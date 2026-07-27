@@ -143,6 +143,7 @@ from PySide6.QtCore import (
     QObject,
     QParallelAnimationGroup,
     QPoint,
+    Property,
     QPropertyAnimation,
     QRect,
     QRectF,
@@ -1562,6 +1563,23 @@ def build_home_refresh_icon() -> QIcon:
     return QIcon(pixmap)
 
 
+def build_home_search_icon() -> QIcon:
+    pixmap = QPixmap(48, 48)
+    pixmap.fill(Qt.transparent)
+    svg = """
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+      <path fill="none" stroke="#ffffff" stroke-width="3.8" stroke-linecap="round" d="M21.5 12.5A9 9 0 1 0 21.5 30.5A9 9 0 1 0 21.5 12.5"/>
+      <path fill="none" stroke="#ffffff" stroke-width="3.8" stroke-linecap="round" d="M28.2 28.2L36 36"/>
+    </svg>
+    """
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    renderer.render(painter, QRectF(7, 7, 34, 34))
+    painter.end()
+    return QIcon(pixmap)
+
+
 class HomeIconButton(QToolButton):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1590,6 +1608,103 @@ class HomeIconButton(QToolButton):
         super().leaveEvent(event)
 
 
+class AnimatedSearchBox(QFrame):
+    width_changed = Signal()
+
+    COLLAPSED_WIDTH = 56
+    EXPANDED_WIDTH = 400
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.expanded = False
+        self._animated_width = self.COLLAPSED_WIDTH
+        self.setObjectName("homeSearchBox")
+        self.setProperty("expanded", False)
+        self.setFixedHeight(56)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._set_animated_width(self.COLLAPSED_WIDTH)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.width_animation = QPropertyAnimation(self, b"animatedWidth", self)
+        self.width_animation.setDuration(230)
+        self.width_animation.setEasingCurve(QEasingCurve.InOutCubic)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 14, 0)
+        layout.setSpacing(0)
+        self.button = QToolButton()
+        self.button.setObjectName("homeSearchButton")
+        self.button.setIcon(build_home_search_icon())
+        self.button.setIconSize(QSize(48, 48))
+        self.button.setFixedSize(56, 52)
+        self.button.setCursor(Qt.PointingHandCursor)
+        self.edit = QLineEdit()
+        self.edit.setObjectName("homeSearchInput")
+        self.edit.setPlaceholderText("")
+        self.edit.setClearButtonEnabled(False)
+        self.edit.setMinimumWidth(0)
+        self.edit.setVisible(False)
+        self.edit.installEventFilter(self)
+        layout.addWidget(self.button)
+        layout.addWidget(self.edit, 1)
+        self.button.clicked.connect(self.expand)
+
+    def _get_animated_width(self) -> int:
+        return self._animated_width
+
+    def _set_animated_width(self, width: int) -> None:
+        self._animated_width = int(width)
+        self.setMinimumWidth(self._animated_width)
+        self.setMaximumWidth(self._animated_width)
+        self.resize(self._animated_width, self.height())
+        self.updateGeometry()
+        self.width_changed.emit()
+
+    animatedWidth = Property(int, _get_animated_width, _set_animated_width)
+
+    def expand(self) -> None:
+        if self.expanded:
+            self.edit.setFocus(Qt.MouseFocusReason)
+            return
+        self.expanded = True
+        self.setProperty("expanded", True)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.setCursor(Qt.IBeamCursor)
+        self.edit.setVisible(True)
+        self.width_animation.stop()
+        self.width_animation.setStartValue(self._animated_width)
+        self.width_animation.setEndValue(self.EXPANDED_WIDTH)
+        self.width_animation.start()
+        QTimer.singleShot(80, lambda: self.edit.setFocus(Qt.MouseFocusReason))
+
+    def collapse_if_empty(self) -> None:
+        if not self.expanded or self.edit.text():
+            return
+        self.expanded = False
+        self.setProperty("expanded", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.setCursor(Qt.PointingHandCursor)
+        self.edit.clearFocus()
+        self.width_animation.stop()
+        self.width_animation.setStartValue(self._animated_width)
+        self.width_animation.setEndValue(self.COLLAPSED_WIDTH)
+        self.width_animation.start()
+        QTimer.singleShot(230, lambda: self.edit.setVisible(self.expanded))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.expand()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self.edit and event.type() == QEvent.FocusOut:
+            QTimer.singleShot(80, self.collapse_if_empty)
+        return super().eventFilter(watched, event)
+
+
 class HomePage(QWidget):
     refresh_requested = Signal()
     movie_activated = Signal(object)
@@ -1600,6 +1715,7 @@ class HomePage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         header = QFrame()
+        self.header = header
         header.setObjectName("homeHeader")
         header.setFixedHeight(68)
         header_layout = QHBoxLayout(header)
@@ -1613,22 +1729,25 @@ class HomePage(QWidget):
         home.setObjectName("navActive")
         library = QLabel("My Library")
         library.setObjectName("navItem")
-        self.search = QLineEdit()
-        self.search.setObjectName("homeSearch")
-        self.search.setPlaceholderText("Search titles")
-        self.search.setClearButtonEnabled(True)
+        self.search_box = AnimatedSearchBox(header)
+        self.search = self.search_box.edit
         self.refresh_button = HomeIconButton()
         self.refresh_button.setObjectName("homeRefreshIcon")
         self.refresh_button.setToolTip("Refresh library")
         self.refresh_button.setIcon(build_home_refresh_icon())
+        self.header_controls = QWidget()
+        self.header_controls.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        header_controls_layout = QHBoxLayout(self.header_controls)
+        header_controls_layout.setContentsMargins(0, 0, 0, 0)
+        header_controls_layout.setSpacing(0)
+        header_controls_layout.addWidget(self.refresh_button)
         header_layout.addWidget(logo)
         header_layout.addWidget(brand)
         header_layout.addSpacing(15)
         header_layout.addWidget(home)
         header_layout.addWidget(library)
         header_layout.addStretch()
-        header_layout.addWidget(self.search)
-        header_layout.addWidget(self.refresh_button)
+        header_layout.addWidget(self.header_controls)
         root.addWidget(header)
 
         self.progress_frame = QFrame()
@@ -1666,6 +1785,48 @@ class HomePage(QWidget):
         root.addWidget(self.scroll, 1)
 
         self.refresh_button.clicked.connect(self.refresh_requested)
+        self.search_box.width_changed.connect(self._position_search_box)
+        self.header.installEventFilter(self)
+        self.header_controls.installEventFilter(self)
+        self.refresh_button.installEventFilter(self)
+        self._search_position_pending = False
+        self.search_box.raise_()
+        self._schedule_position_search_box()
+
+    def _schedule_position_search_box(self) -> None:
+        if self._search_position_pending:
+            return
+        self._search_position_pending = True
+        QTimer.singleShot(0, self._position_search_box)
+
+    def _position_search_box(self) -> None:
+        self._search_position_pending = False
+        header_layout = self.header.layout()
+        if header_layout is not None:
+            header_layout.activate()
+        refresh_pos = self.refresh_button.mapTo(self.header, QPoint(0, 0))
+        x = refresh_pos.x() - self.search_box.width()
+        y = (self.header.height() - self.search_box.height()) // 2
+        self.search_box.move(max(0, x), max(0, y))
+        self.search_box.show()
+        self.search_box.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._schedule_position_search_box()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._schedule_position_search_box()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched in {self.header, self.header_controls, self.refresh_button} and event.type() in {
+            QEvent.LayoutRequest,
+            QEvent.Resize,
+            QEvent.Show,
+        }:
+            self._schedule_position_search_box()
+        return super().eventFilter(watched, event)
 
     def set_scanning(self, text: Optional[str], current: int = 0, total: int = 0) -> None:
         if text is None:
@@ -4563,15 +4724,32 @@ QMainWindow, QStackedWidget, #homeContent, #homeScroll,
 #navItem {
     color: #a8a8a8;
 }
-#homeSearch {
-    background: #161616;
-    border: 1px solid #555555;
-    border-radius: 4px;
-    padding: 7px 10px;
-    min-width: 210px;
+#homeSearchBox {
+    background: transparent;
+    border: none;
 }
-#homeSearch:focus {
-    border-color: #ffffff;
+#homeSearchBox[expanded="true"] {
+    background: #151515;
+    border: 2px solid #5c5c5c;
+    border-radius: 28px;
+}
+#homeSearchButton {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+}
+#homeSearchButton:hover, #homeSearchButton:pressed {
+    background: transparent;
+    border: none;
+}
+#homeSearchInput {
+    background: transparent;
+    border: none;
+    color: #ffffff;
+    font-size: 16px;
+    padding: 0 0 0 4px;
+    selection-background-color: #e50914;
 }
 #homeRefreshIcon {
     background: transparent;

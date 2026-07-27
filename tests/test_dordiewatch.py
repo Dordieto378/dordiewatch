@@ -12,10 +12,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PIL import Image
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton, QStackedWidget, QWidget
 
 from dordiewatch import (
     DordieWatchWindow,
+    HomePage,
     HoverIconButton,
     LibraryCollection,
     LibraryScanTask,
@@ -62,7 +63,7 @@ class DordieWatchCoreTest(unittest.TestCase):
             },
         }
 
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             root = Path(temporary)
             folder = root / "A deliberately unrelated local folder name"
             folder.mkdir()
@@ -1149,6 +1150,79 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
                     os.environ.pop("LOCALAPPDATA", None)
                 else:
                     os.environ["LOCALAPPDATA"] = previous
+
+    def test_home_search_expands_from_icon(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        home = HomePage()
+        home.resize(1200, 800)
+        home.show()
+        app.processEvents()
+
+        self.assertFalse(home.search_box.expanded)
+        self.assertFalse(home.search_box.property("expanded"))
+        self.assertFalse(home.search.isVisible())
+        self.assertEqual(home.search.placeholderText(), "")
+        self.assertEqual(home.search_box.button.iconSize(), QSize(48, 48))
+        self.assertEqual(home.header_controls.layout().spacing(), 0)
+        self.assertEqual(
+            home.search_box.maximumWidth(),
+            home.search_box.COLLAPSED_WIDTH,
+        )
+        self.assertEqual(
+            home.search_box.minimumWidth(),
+            home.search_box.COLLAPSED_WIDTH,
+        )
+        refresh_x = home.refresh_button.mapTo(home, QPoint(0, 0)).x()
+        search_right = home.search_box.mapTo(home, QPoint(home.search_box.width(), 0)).x()
+        self.assertEqual(search_right, refresh_x)
+
+        QTest.mouseClick(
+            home.search_box.button,
+            Qt.LeftButton,
+            pos=QPoint(18, 26),
+        )
+        QTest.qWait(280)
+        app.processEvents()
+
+        self.assertTrue(home.search_box.expanded)
+        self.assertTrue(home.search_box.property("expanded"))
+        self.assertTrue(home.search.isVisible())
+        self.assertEqual(
+            home.search_box.maximumWidth(),
+            home.search_box.EXPANDED_WIDTH,
+        )
+        self.assertEqual(
+            home.search_box.minimumWidth(),
+            home.search_box.EXPANDED_WIDTH,
+        )
+        self.assertEqual(home.refresh_button.mapTo(home, QPoint(0, 0)).x(), refresh_x)
+        home.close()
+
+    def test_home_search_survives_hidden_page_resize(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        stack = QStackedWidget()
+        home = HomePage()
+        other = QWidget()
+        stack.addWidget(home)
+        stack.addWidget(other)
+        stack.resize(1200, 800)
+        stack.show()
+        app.processEvents()
+
+        stack.setCurrentWidget(other)
+        stack.resize(860, 620)
+        app.processEvents()
+        stack.setCurrentWidget(home)
+        QTest.qWait(80)
+        app.processEvents()
+
+        self.assertTrue(home.search_box.isVisible())
+        refresh_x = home.refresh_button.mapTo(home, QPoint(0, 0)).x()
+        search_right = home.search_box.mapTo(
+            home, QPoint(home.search_box.width(), 0)
+        ).x()
+        self.assertEqual(search_right, refresh_x)
+        stack.close()
 
 
 if __name__ == "__main__":
