@@ -159,6 +159,7 @@ from PySide6.QtGui import (
     QIcon,
     QKeySequence,
     QLinearGradient,
+    QOpenGLContext,
     QPainter,
     QPainterPath,
     QPen,
@@ -187,6 +188,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtSvg import QSvgRenderer
 
 
@@ -1880,6 +1882,102 @@ def subtitle_preference_key_for_movie(movie: Movie) -> str:
         return str(folder)
 
 
+class MpvVideoSurface(QOpenGLWidget):
+    frame_update_requested = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.player = None
+        self.render_context = None
+        self._gl_proc_callback = None
+        self.setAutoFillBackground(False)
+        self.frame_update_requested.connect(self.update)
+
+    def attach_player(self, player) -> None:
+        self.player = player
+        if self.context() is not None and self.context().isValid():
+            try:
+                self.makeCurrent()
+                self._ensure_render_context()
+            finally:
+                self.doneCurrent()
+        self.update()
+
+    def detach_player(self) -> None:
+        if self.render_context is not None:
+            try:
+                self.makeCurrent()
+                self.render_context.free()
+            except Exception:
+                pass
+            finally:
+                self.render_context = None
+                self.doneCurrent()
+        self.player = None
+
+    def initializeGL(self) -> None:
+        self._ensure_render_context()
+
+    def paintGL(self) -> None:
+        self._ensure_render_context()
+        if self.render_context is None:
+            return
+        scale = self.devicePixelRatioF()
+        width = max(1, int(self.width() * scale))
+        height = max(1, int(self.height() * scale))
+        try:
+            self.render_context.update()
+            self.render_context.render(
+                opengl_fbo={
+                    "w": width,
+                    "h": height,
+                    "fbo": int(self.defaultFramebufferObject()),
+                    "internal_format": 0,
+                },
+                flip_y=True,
+            )
+            self.render_context.report_swap()
+        except Exception:
+            pass
+
+    def resizeGL(self, _width: int, _height: int) -> None:
+        self.update()
+
+    def _ensure_render_context(self) -> None:
+        if self.render_context is not None or self.player is None or mpv is None:
+            return
+        context = QOpenGLContext.currentContext()
+        if context is None:
+            return
+
+        @mpv.MpvGlGetProcAddressFn
+        def get_proc_address(_ctx, name) -> int:
+            active_context = QOpenGLContext.currentContext()
+            if active_context is None:
+                return 0
+            try:
+                address = active_context.getProcAddress(name)
+            except TypeError:
+                address = active_context.getProcAddress(name.decode("ascii"))
+            if not address:
+                return 0
+            try:
+                return int(address)
+            except TypeError:
+                return int(address.__int__())
+
+        try:
+            self._gl_proc_callback = get_proc_address
+            self.render_context = mpv.MpvRenderContext(
+                self.player,
+                "opengl",
+                opengl_init_params={"get_proc_address": get_proc_address},
+            )
+            self.render_context.update_cb = self.frame_update_requested.emit
+        except Exception:
+            self.render_context = None
+
+
 class MpvController(QObject):
     position_changed = Signal(int, int)
     playing_changed = Signal(bool)
@@ -1901,9 +1999,8 @@ class MpvController(QObject):
         if mpv is not None and MPV_RUNTIME is not None:
             try:
                 self.player = mpv.MPV(
-                    wid=str(int(self.surface.winId())),
                     idle=True,
-                    force_window=True,
+                    vo="libmpv",
                     input_default_bindings=False,
                     input_vo_keyboard=False,
                     osc=False,
@@ -1916,6 +2013,9 @@ class MpvController(QObject):
                     audio_display="no",
                     keep_open=False,
                 )
+                if hasattr(self.surface, "attach_player"):
+                    self.surface.attach_player(self.player)
+                self.fit_video()
             except Exception as error:
                 self.error.emit(str(error))
 
@@ -1938,7 +2038,6 @@ class MpvController(QObject):
             self._opened_at = time.monotonic()
             self._has_media = True
             self._ended_emitted = False
-            self.player.wid = int(self.surface.winId())
             self.player.volume = max(0, min(100, int(volume)))
             self.player.mute = False
             self.player.pause = False
@@ -1997,11 +2096,23 @@ class MpvController(QObject):
     def fit_video(self) -> None:
         if not self.player:
             return
-        try:
-            self.player.video_aspect_override = "no"
-            self.player.video_crop = "none"
-        except Exception:
-            pass
+        for option, value in (
+            ("keepaspect", "yes"),
+            ("keepaspect-window", "no"),
+            ("panscan", "0"),
+            ("video-zoom", "0"),
+            ("video-align-x", "0"),
+            ("video-align-y", "0"),
+            ("video-aspect-override", "no"),
+            ("video-crop", "none"),
+        ):
+            try:
+                self.player.command("set", option, value)
+            except Exception:
+                try:
+                    setattr(self.player, option.replace("-", "_"), value)
+                except Exception:
+                    pass
 
     def stop(self) -> None:
         self._generation += 1
@@ -2607,12 +2718,7 @@ class PlayerPage(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
 
-        self.overlay = QWidget(
-            self,
-            Qt.Tool
-            | Qt.FramelessWindowHint
-            | Qt.NoDropShadowWindowHint,
-        )
+        self.overlay = QWidget(self)
         self.overlay.setObjectName("playerOverlay")
         self.overlay.setAttribute(Qt.WA_TranslucentBackground, True)
         self.overlay.setAutoFillBackground(False)
@@ -2621,9 +2727,8 @@ class PlayerPage(QWidget):
         self.overlay.installEventFilter(self)
         self.overlay.hide()
 
-        self.video_surface = QFrame(self)
+        self.video_surface = MpvVideoSurface(self)
         self.video_surface.setObjectName("videoSurface")
-        self.video_surface.setAttribute(Qt.WA_NativeWindow)
         self.video_surface.setMouseTracking(True)
         self.video_surface.installEventFilter(self)
         self.controller = MpvController(self.video_surface)
@@ -2810,7 +2915,6 @@ class PlayerPage(QWidget):
         self.routed_press_timer.setSingleShot(True)
         self.routed_press_timer.setInterval(1200)
         self.routed_press_timer.timeout.connect(self._cancel_routed_control_press)
-
         self.play_button.clicked.connect(self._toggle_playback)
         self.rewind_button.clicked.connect(lambda: self._seek_by(-10_000))
         self.forward_button.clicked.connect(lambda: self._seek_by(10_000))
@@ -2850,6 +2954,7 @@ class PlayerPage(QWidget):
         self.title.setText(movie.title)
         self.selected_subtitle = -1
         self.subtitle_preference_applied = False
+        self._sync_video_surface_geometry()
         self.timeline.setRange(0, max(0, movie.duration_ms))
         self.timeline.setValue(movie.progress_ms if not movie.completed else 0)
         set_player_button_icon(self.play_button, "pause")
@@ -2936,21 +3041,38 @@ class PlayerPage(QWidget):
         self.overlay.hide()
         self.overlay.setEnabled(True)
         self.movie = None
+        self.video_surface.setGeometry(self.rect())
         self.close_pending = False
         self.back_button.setEnabled(True)
         self.back_requested.emit()
 
     def resizeEvent(self, event) -> None:
-        self.video_surface.setGeometry(self.rect())
+        self._sync_video_surface_geometry()
         self._sync_overlay_geometry()
         self.video_surface.lower()
         super().resizeEvent(event)
 
+    def begin_interactive_resize(self) -> None:
+        self._sync_video_surface_geometry()
+
+    def end_interactive_resize(self) -> None:
+        self._settle_video_layout()
+
+    def _settle_video_layout(self) -> None:
+        self._sync_video_surface_geometry()
+        self._sync_overlay_geometry()
+        self.controller.fit_video()
+
+    def _sync_video_surface_geometry(self) -> None:
+        target = self.rect()
+        if self.video_surface.geometry() != target:
+            self.video_surface.setGeometry(target)
+        self.video_surface.lower()
+
     def _sync_overlay_geometry(self) -> None:
         if not hasattr(self, "overlay") or not hasattr(self, "top_bar"):
             return
-        top_left = self.mapToGlobal(QPoint(0, 0))
-        target = QRect(top_left, self.size())
+        target = QRect(0, 0, self.width(), self.height())
         if self.overlay.geometry() != target:
             self.overlay.setGeometry(target)
         self.top_bar.resize(self.overlay.width(), 96)
@@ -3013,9 +3135,7 @@ class PlayerPage(QWidget):
         if (
             event.type() == QEvent.MouseButtonPress
             and event.button() == Qt.LeftButton
-            and self._dismiss_track_panel_at(
-                event.globalPosition().toPoint()
-            )
+            and self._dismiss_track_panel_for_event(watched, event)
         ):
             event.accept()
             return True
@@ -3031,7 +3151,9 @@ class PlayerPage(QWidget):
             and event.type() == QEvent.MouseButtonPress
             and event.button() == Qt.LeftButton
         ):
-            button = self._control_button_at_global(event.globalPosition().toPoint())
+            button = self._control_button_at_global_position(
+                event.globalPosition().toPoint()
+            )
             if button is not None:
                 self._begin_routed_control_press(button)
                 event.accept()
@@ -3601,14 +3723,13 @@ class PlayerPage(QWidget):
         )
 
         def restore_overlay() -> None:
-            self._sync_overlay_geometry()
+            self._settle_video_layout()
             self.overlay.show()
             self.overlay.raise_()
             self._restore_overlay_input(force=True)
             self._show_controls(keep=True)
 
         QTimer.singleShot(0, restore_overlay)
-        QTimer.singleShot(100, self._sync_overlay_geometry)
         QTimer.singleShot(
             600, lambda: setattr(self, "ignore_click_release", False)
         )
@@ -3783,6 +3904,20 @@ class PlayerPage(QWidget):
         self._close_track_panel()
         return True
 
+    def _dismiss_track_panel_for_event(self, watched: QObject, event: QEvent) -> bool:
+        panel = self.track_panel
+        if panel is None or not panel.isVisible():
+            return False
+        if watched is self.overlay:
+            local_position = event.position().toPoint()
+            if panel.geometry().contains(local_position):
+                return False
+            self.dismiss_click_active = True
+            self._cancel_routed_control_press()
+            self._close_track_panel()
+            return True
+        return self._dismiss_track_panel_at(event.globalPosition().toPoint())
+
     def _close_track_panel(self, reveal_controls: bool = True) -> None:
         panel = self.track_panel
         self.track_panel = None
@@ -3920,6 +4055,9 @@ class PlayerPage(QWidget):
 
 
 class DordieWatchWindow(QMainWindow):
+    WM_ENTERSIZEMOVE = 0x0231
+    WM_EXITSIZEMOVE = 0x0232
+
     def __init__(self, launch_manifest_url: Optional[str] = None) -> None:
         super().__init__()
         self.store = DordieWatchStore()
@@ -4006,6 +4144,20 @@ class DordieWatchWindow(QMainWindow):
                 0,
                 lambda url=launch_manifest_url: self.open_website_media(url),
             )
+
+    def nativeEvent(self, event_type, message):
+        if sys.platform == "win32" and hasattr(self, "player"):
+            try:
+                native_message = ctypes.wintypes.MSG.from_address(int(message))
+            except (TypeError, ValueError):
+                return super().nativeEvent(event_type, message)
+            if native_message.message == self.WM_ENTERSIZEMOVE:
+                if self.pages.currentWidget() is self.player:
+                    self.player.begin_interactive_resize()
+            elif native_message.message == self.WM_EXITSIZEMOVE:
+                if self.pages.currentWidget() is self.player:
+                    self.player.end_interactive_resize()
+        return super().nativeEvent(event_type, message)
 
     def rebuild_home(self, *_args) -> None:
         self.home.rebuild(self.roots, self.movies, self.home.search.text())

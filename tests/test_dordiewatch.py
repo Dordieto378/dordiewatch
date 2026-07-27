@@ -21,6 +21,7 @@ from dordiewatch import (
     LibraryScanTask,
     Movie,
     MpvController,
+    MpvVideoSurface,
     SeekSlider,
     MPV_RUNTIME,
     build_collections,
@@ -336,6 +337,126 @@ class DordieWatchCoreTest(unittest.TestCase):
                 else:
                     os.environ["LOCALAPPDATA"] = previous
 
+    def test_video_surface_fills_player_and_mpv_preserves_aspect(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temporary:
+            previous = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = temporary
+            try:
+                window = DordieWatchWindow()
+                window.player.resize(800, 800)
+                window.player.movie = Movie(
+                    path=str(Path(temporary) / "wide.mkv"),
+                    title="Wide",
+                    root=temporary,
+                    size=0,
+                    modified=0,
+                    width=1920,
+                    height=1080,
+                )
+                window.player._sync_video_surface_geometry()
+
+                geometry = window.player.video_surface.geometry()
+                self.assertEqual(geometry.width(), 800)
+                self.assertEqual(geometry.height(), 800)
+                self.assertEqual(geometry.y(), 0)
+                window.player.movie = None
+                window.close()
+            finally:
+                if previous is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous
+
+    def test_video_resize_does_not_reconfigure_mpv(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temporary:
+            previous = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = temporary
+            try:
+                window = DordieWatchWindow()
+                calls = []
+                window.player.controller.fit_video = lambda: calls.append("fit")
+                window.player.resize(900, 700)
+                window.player._sync_video_surface_geometry()
+
+                self.assertEqual(calls, [])
+                window.close()
+            finally:
+                if previous is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous
+
+    def test_video_resize_settle_reapplies_final_contain_fit(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temporary:
+            previous = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = temporary
+            try:
+                window = DordieWatchWindow()
+                calls = []
+                window.player.controller.fit_video = lambda: calls.append("fit")
+                window.player.resize(900, 700)
+                window.player._settle_video_layout()
+
+                self.assertEqual(window.player.video_surface.geometry(), window.player.rect())
+                self.assertEqual(calls, ["fit"])
+                window.close()
+            finally:
+                if previous is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous
+
+    def test_video_surface_resizes_immediately_during_drag(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temporary:
+            previous = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = temporary
+            try:
+                window = DordieWatchWindow()
+                window.player.resize(800, 600)
+                window.player.movie = Movie(
+                    path=str(Path(temporary) / "episode.mkv"),
+                    title="Episode",
+                    root=temporary,
+                    size=0,
+                    modified=0,
+                )
+                window.player._sync_video_surface_geometry()
+                self.assertEqual(window.player.video_surface.size(), QSize(800, 600))
+
+                window.player.begin_interactive_resize()
+                window.player.resize(830, 620)
+                window.player._sync_video_surface_geometry()
+                updated = window.player.video_surface.geometry()
+                self.assertEqual(updated.size(), QSize(830, 620))
+                self.assertEqual(updated.x(), 0)
+                self.assertEqual(updated.y(), 0)
+
+                window.player.resize(900, 700)
+                window.player._sync_video_surface_geometry()
+                updated = window.player.video_surface.geometry()
+                self.assertEqual(updated.size(), QSize(900, 700))
+                self.assertEqual(updated.x(), 0)
+                self.assertEqual(updated.y(), 0)
+
+                window.player.resize(930, 720)
+                window.player.end_interactive_resize()
+                self.assertEqual(window.player.video_surface.size(), QSize(930, 720))
+                self.assertIsInstance(window.player.video_surface, MpvVideoSurface)
+                self.assertFalse(
+                    window.player.video_surface.testAttribute(Qt.WA_NativeWindow)
+                )
+                window.player.movie = None
+                window.close()
+            finally:
+                if previous is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous
+
     def test_timeline_drag_does_not_seek_until_release(self) -> None:
         app = QApplication.instance() or QApplication([])
         slider = SeekSlider(Qt.Horizontal)
@@ -371,6 +492,41 @@ class DordieWatchCoreTest(unittest.TestCase):
         controller.set_time(12_345)
 
         self.assertEqual(calls, [("seek", 12.345, "absolute", "exact")])
+
+    def test_mpv_fit_video_forces_letterboxed_aspect_mode(self) -> None:
+        calls = []
+
+        class FakePlayer:
+            def command(self, *args):
+                calls.append(args)
+
+        controller = MpvController.__new__(MpvController)
+        controller.player = FakePlayer()
+
+        controller.fit_video()
+
+        self.assertIn(("set", "keepaspect", "yes"), calls)
+        self.assertIn(("set", "keepaspect-window", "no"), calls)
+        self.assertIn(("set", "panscan", "0"), calls)
+        self.assertIn(("set", "video-zoom", "0"), calls)
+        self.assertIn(("set", "video-aspect-override", "no"), calls)
+        self.assertIn(("set", "video-crop", "none"), calls)
+
+    def test_mpv_render_params_are_wrapper_dicts(self) -> None:
+        def noop_proc_address(_ctx, _name):
+            return 0
+
+        init_param = mpv.MpvRenderParam(
+            "opengl_init_params",
+            {"get_proc_address": mpv.MpvGlGetProcAddressFn(noop_proc_address)},
+        )
+        fbo_param = mpv.MpvRenderParam(
+            "opengl_fbo",
+            {"w": 800, "h": 450, "fbo": 1, "internal_format": 0},
+        )
+
+        self.assertEqual(init_param.type_id, 2)
+        self.assertEqual(fbo_param.type_id, 3)
 
     def test_close_waits_for_active_playback_to_pause_before_stop(self) -> None:
         app = QApplication.instance() or QApplication([])
@@ -708,11 +864,12 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
                 self.assertTrue(
                     window.player.overlay.testAttribute(Qt.WA_TranslucentBackground)
                 )
-                self.assertTrue(window.player.overlay.isWindow())
-                self.assertIs(window.player.top_bar.window(), window.player.overlay)
-                self.assertIs(
-                    window.player.bottom_bar.window(), window.player.overlay
-                )
+                window.player._sync_overlay_geometry()
+                self.assertFalse(window.player.overlay.isWindow())
+                self.assertIs(window.player.overlay.parent(), window.player)
+                self.assertEqual(window.player.overlay.geometry(), window.player.rect())
+                self.assertIs(window.player.top_bar.parent(), window.player.overlay)
+                self.assertIs(window.player.bottom_bar.parent(), window.player.overlay)
                 self.assertIsInstance(window.player.timeline, SeekSlider)
                 window.player.timeline.setRange(0, 1_000)
                 window.player.timeline.setFixedWidth(200)
@@ -915,14 +1072,14 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
                     size=0,
                     modified=0,
                 )
+                window.pages.setCurrentWidget(window.player)
+                app.processEvents()
                 window.player.overlay.show()
-                window.player.overlay.activateWindow()
                 window.player.open_settings_menu()
                 app.processEvents()
                 self.assertIsNotNone(window.player.track_panel)
                 self.assertFalse(window.player.track_panel.isHidden())
                 self.assertTrue(window.player.menu_open)
-                self.assertTrue(window.player.hide_timer.isActive())
                 QTest.mouseClick(
                     window.player.overlay,
                     Qt.LeftButton,
