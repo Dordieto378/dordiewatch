@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import binascii
@@ -29,9 +29,19 @@ VENDOR_ROOT = SOURCE_ROOT / "vendor"
 if VENDOR_ROOT.is_dir():
     sys.path.insert(0, str(VENDOR_ROOT))
 
+APP_FONT_FAMILY = "Netflix Sans"
+
 
 def bundle_root() -> Path:
     return Path(getattr(sys, "_MEIPASS", SOURCE_ROOT))
+
+
+def app_font_family() -> str:
+    return APP_FONT_FAMILY
+
+
+def app_qfont(point_size: int, weight=None):
+    return QFont(app_font_family(), point_size, QFont.Normal if weight is None else weight)
 
 
 def project_videos_dir() -> Path:
@@ -143,6 +153,7 @@ from PySide6.QtCore import (
     QObject,
     QParallelAnimationGroup,
     QPoint,
+    QPointF,
     Property,
     QPropertyAnimation,
     QRect,
@@ -157,6 +168,7 @@ from PySide6.QtGui import (
     QColor,
     QCursor,
     QFont,
+    QFontDatabase,
     QIcon,
     QKeySequence,
     QLinearGradient,
@@ -165,6 +177,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QRegion,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -193,8 +206,31 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtSvg import QSvgRenderer
 
 
+def load_app_font(app: QApplication) -> str:
+    global APP_FONT_FAMILY
+    candidates = [
+        bundle_root() / "font" / "NetflixSans-Bold.otf",
+        SOURCE_ROOT / "font" / "NetflixSans-Bold.otf",
+    ]
+    for font_path in candidates:
+        if not font_path.is_file():
+            continue
+        font_id = QFontDatabase.addApplicationFont(str(font_path))
+        if font_id < 0:
+            continue
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if families:
+            APP_FONT_FAMILY = families[0]
+            app.setFont(QFont(APP_FONT_FAMILY, 10))
+            return APP_FONT_FAMILY
+    app.setFont(QFont(APP_FONT_FAMILY, 10))
+    return APP_FONT_FAMILY
+
+
 APP_NAME = "DordieWatch"
 APP_VERSION = 4
+EPISODE_PREVIEW_CACHE_VERSION = "episode-preview-v2"
+EPISODE_PREVIEW_PLACEHOLDER_MARKER = ".placeholder"
 VIDEO_EXTENSIONS = {
     ".3g2",
     ".3gp",
@@ -229,6 +265,72 @@ def app_data_dir() -> Path:
             pass
     result.mkdir(parents=True, exist_ok=True)
     return result
+
+
+_DEBUG_LOG_HANDLE = None
+_DEBUG_LOG_LOCK = threading.Lock()
+_DEBUG_LOG_STARTED = time.monotonic()
+
+
+def _debug_log_path() -> Path:
+    return app_data_dir() / "debug.log"
+
+
+def install_debug_logging() -> None:
+    global _DEBUG_LOG_HANDLE
+    try:
+        path = _debug_log_path()
+        if path.is_file() and path.stat().st_size > 8 * 1024 * 1024:
+            path.replace(path.with_suffix(".previous.log"))
+        _DEBUG_LOG_HANDLE = path.open("w", encoding="utf-8")
+        diagnostic_log(
+            "app.debug_log.start",
+            path=str(path),
+            argv=" ".join(sys.argv),
+            frozen=bool(getattr(sys, "frozen", False)),
+            source_root=str(SOURCE_ROOT),
+            mpv_runtime=str(MPV_RUNTIME) if MPV_RUNTIME else "",
+        )
+    except OSError:
+        _DEBUG_LOG_HANDLE = None
+
+
+def diagnostic_log(event: str, **fields) -> None:
+    handle = _DEBUG_LOG_HANDLE
+    if handle is None:
+        return
+    elapsed = time.monotonic() - _DEBUG_LOG_STARTED
+    parts = [f"{elapsed:010.3f}", event]
+    for key, value in fields.items():
+        if isinstance(value, bool):
+            text = "true" if value else "false"
+        elif value is None:
+            text = "none"
+        else:
+            text = str(value)
+        text = text.replace("\r", "\\r").replace("\n", "\\n")
+        if len(text) > 280:
+            text = text[:277] + "..."
+        parts.append(f"{key}={text}")
+    line = " | ".join(parts) + "\n"
+    with _DEBUG_LOG_LOCK:
+        try:
+            handle.write(line)
+            handle.flush()
+        except OSError:
+            pass
+
+
+def widget_snapshot(widget: QWidget) -> str:
+    try:
+        geometry = widget.geometry()
+        return (
+            f"{geometry.x()},{geometry.y()} "
+            f"{geometry.width()}x{geometry.height()} "
+            f"visible={widget.isVisible()} enabled={widget.isEnabled()}"
+        )
+    except Exception as error:
+        return f"unavailable:{error}"
 
 
 def install_crash_logging() -> None:
@@ -285,6 +387,13 @@ def format_duration(milliseconds: int | float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def format_episode_runtime(milliseconds: int | float) -> str:
+    if not milliseconds:
+        return ""
+    minutes = max(1, int(float(milliseconds) // 60000))
+    return f"{minutes}m"
 
 
 def format_bytes(size: int) -> str:
@@ -686,7 +795,7 @@ def _placeholder_image(path: Path, title: str) -> None:
     draw.polygon([(285, 135), (285, 225), (370, 180)], fill="#e50914")
     draw.text(
         (24, 320),
-        textwrap.shorten(title, width=60, placeholder="…"),
+        textwrap.shorten(title, width=60, placeholder="â€¦"),
         fill="#dddddd",
         font=ImageFont.load_default(),
     )
@@ -705,6 +814,42 @@ def catalog_placeholder(
     if not placeholder.is_file():
         _placeholder_image(placeholder, title)
     return str(placeholder)
+
+
+def episode_still_for_movie(movie: Movie) -> str:
+    frames = usable_episode_preview_frames(movie)
+    if frames:
+        return frames[0]
+    return ""
+
+
+def is_placeholder_preview_path(path: str | Path) -> bool:
+    preview_path = Path(path)
+    parent = preview_path.parent
+    if (parent / EPISODE_PREVIEW_PLACEHOLDER_MARKER).is_file():
+        return True
+    # Legacy placeholder caches had only preview-01.jpg plus thumbnail.jpg and
+    # no marker. Treat one-frame preview caches as invalid so they regenerate.
+    if (
+        preview_path.name in {"thumbnail.jpg", "preview-01.jpg"}
+        and (parent / "preview-01.jpg").is_file()
+        and not (parent / "preview-02.jpg").is_file()
+    ):
+        return True
+    return False
+
+
+def usable_episode_preview_frames(movie: Movie) -> list[str]:
+    frames = [
+        path
+        for path in movie.preview_frames
+        if Path(path).is_file() and not is_placeholder_preview_path(path)
+    ]
+    return frames if len(frames) >= 2 else []
+
+
+def has_episode_preview_frames(movie: Movie) -> bool:
+    return bool(usable_episode_preview_frames(movie))
 
 
 def update_movies_from_website(
@@ -744,15 +889,12 @@ def update_movies_from_website(
             and path_is_within(downloaded_cover, store.website_cover_dir)
         ):
             movie.cover = downloaded_cover
-            movie.thumbnail = downloaded_cover
         elif previous_cover and previous_cover_url == movie.cover_source_url:
             movie.cover = previous_cover
-            movie.thumbnail = previous_cover
         else:
             movie.cover = ""
-            movie.thumbnail = catalog_placeholder(
-                store, Path(movie.path), movie.title
-            )
+        if not episode_still_for_movie(movie):
+            movie.thumbnail = catalog_placeholder(store, Path(movie.path), movie.title)
         updated += 1
     return updated
 
@@ -762,8 +904,13 @@ def generate_previews(
 ) -> tuple[str, tuple[str, ...]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     thumbnail = output_dir / "thumbnail.jpg"
+    placeholder_marker = output_dir / EPISODE_PREVIEW_PLACEHOLDER_MARKER
     existing = sorted(output_dir.glob("preview-*.jpg"))
-    if thumbnail.is_file() and existing:
+    if (
+        thumbnail.is_file()
+        and len(existing) >= 2
+        and not placeholder_marker.is_file()
+    ):
         return str(thumbnail), tuple(str(frame) for frame in existing)
 
     duration = duration_ms / 1000
@@ -804,7 +951,7 @@ def generate_previews(
                     timeout=35,
                     **process_options(),
                 )
-                if frame.is_file():
+                if frame.is_file() and frame.stat().st_size > 0:
                     frames.append(frame)
             except (OSError, subprocess.SubprocessError):
                 continue
@@ -813,9 +960,17 @@ def generate_previews(
         fallback = output_dir / "preview-01.jpg"
         try:
             _placeholder_image(fallback, video.stem)
+            placeholder_marker.write_text(
+                "ffmpeg preview extraction failed\n", encoding="utf-8"
+            )
             frames.append(fallback)
         except OSError:
             return "", ()
+    else:
+        try:
+            placeholder_marker.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     try:
         with Image.open(frames[min(2, len(frames) - 1)]) as source:
@@ -1061,6 +1216,8 @@ class LibraryScanTask:
         self.runnable = Runnable(self)
         self.signals = ScanSignals()
         self.cancelled = threading.Event()
+        self.ffmpeg = find_binary("ffmpeg")
+        self.ffprobe = find_binary("ffprobe")
         existing_movie_list = list(existing_movies)
         self.existing_movies = {
             str(Path(movie.path).resolve()).casefold(): movie
@@ -1178,6 +1335,35 @@ class LibraryScanTask:
                 self.restore_database_metadata(
                     movie, database_media_id, path
                 )
+                if (
+                    not movie.duration_ms
+                    or not movie.width
+                    or not movie.height
+                ):
+                    duration_ms, width, height = probe_video(path, self.ffprobe)
+                    movie.duration_ms = movie.duration_ms or duration_ms
+                    movie.width = movie.width or width
+                    movie.height = movie.height or height
+                preview_dir = (
+                    self.store.preview_dir
+                    / cache_key(
+                        path,
+                        (
+                            f"{EPISODE_PREVIEW_CACHE_VERSION}:"
+                            f"{stat.st_size}:{stat.st_mtime}"
+                        ),
+                    )
+                )
+                thumbnail, preview_frames = generate_previews(
+                    path,
+                    preview_dir,
+                    movie.duration_ms,
+                    self.ffmpeg,
+                )
+                if thumbnail and Path(thumbnail).is_file():
+                    movie.thumbnail = thumbnail
+                if preview_frames:
+                    movie.preview_frames = preview_frames
                 self.signals.movie.emit(
                     movie.to_dict()
                 )
@@ -1186,6 +1372,105 @@ class LibraryScanTask:
         except RuntimeError:
             return
         except Exception as error:
+            try:
+                self.signals.failed.emit(str(error))
+            except RuntimeError:
+                return
+
+
+class PreviewGenerationTask:
+    def __init__(
+        self,
+        movies: Iterable[Movie],
+        store: DordieWatchStore,
+        task_key: str,
+    ) -> None:
+        from PySide6.QtCore import QRunnable
+
+        class Runnable(QRunnable):
+            def __init__(inner, owner: "PreviewGenerationTask") -> None:
+                super().__init__()
+                inner.owner = owner
+
+            def run(inner) -> None:
+                inner.owner.run()
+
+        self.movies = tuple(Movie.from_dict(movie.to_dict()) for movie in movies)
+        self.store = store
+        self.task_key = task_key
+        self.signals = ScanSignals()
+        self.runnable = Runnable(self)
+        self.cancelled = threading.Event()
+        self.ffmpeg = find_binary("ffmpeg")
+        self.ffprobe = find_binary("ffprobe")
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+    def run(self) -> None:
+        total = len(self.movies)
+        diagnostic_log(
+            "preview_task.start",
+            key=self.task_key,
+            total=total,
+            ffmpeg=self.ffmpeg or "",
+            ffprobe=self.ffprobe or "",
+        )
+        try:
+            for index, movie in enumerate(self.movies, 1):
+                if self.cancelled.is_set():
+                    diagnostic_log("preview_task.cancelled", key=self.task_key)
+                    return
+                if has_episode_preview_frames(movie):
+                    self.signals.movie.emit(movie.to_dict())
+                    self.signals.progress.emit(index, total, movie.title)
+                    continue
+                path = Path(movie.path)
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                if (
+                    not movie.duration_ms
+                    or not movie.width
+                    or not movie.height
+                ):
+                    duration_ms, width, height = probe_video(path, self.ffprobe)
+                    movie.duration_ms = movie.duration_ms or duration_ms
+                    movie.width = movie.width or width
+                    movie.height = movie.height or height
+                preview_dir = (
+                    self.store.preview_dir
+                    / cache_key(
+                        path,
+                        (
+                            f"{EPISODE_PREVIEW_CACHE_VERSION}:"
+                            f"{stat.st_size}:{stat.st_mtime}"
+                        ),
+                    )
+                )
+                thumbnail, preview_frames = generate_previews(
+                    path,
+                    preview_dir,
+                    movie.duration_ms,
+                    self.ffmpeg,
+                )
+                movie.preview_frames = preview_frames
+                if thumbnail and Path(thumbnail).is_file():
+                    movie.thumbnail = thumbnail
+                diagnostic_log(
+                    "preview_task.movie",
+                    key=self.task_key,
+                    title=movie.title,
+                    frames=len(usable_episode_preview_frames(movie)),
+                    thumbnail=movie.thumbnail,
+                )
+                self.signals.movie.emit(movie.to_dict())
+                self.signals.progress.emit(index, total, movie.title)
+            self.signals.finished.emit(self.task_key)
+            diagnostic_log("preview_task.finished", key=self.task_key, total=total)
+        except Exception as error:
+            diagnostic_log("preview_task.failed", key=self.task_key, error=repr(error))
             try:
                 self.signals.failed.emit(str(error))
             except RuntimeError:
@@ -1216,8 +1501,7 @@ class MovieCard(QWidget):
         self.hovered = True
         self.preview_pixmaps = [
             QPixmap(path)
-            for path in self.movie.preview_frames
-            if Path(path).is_file()
+            for path in usable_episode_preview_frames(self.movie)
         ]
         self.preview_pixmaps = [
             pixmap for pixmap in self.preview_pixmaps if not pixmap.isNull()
@@ -1290,7 +1574,7 @@ class MovieCard(QWidget):
             )
 
         painter.setPen(QColor("#f2f2f2"))
-        painter.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
+        painter.setFont(app_qfont(10, QFont.DemiBold))
         title = painter.fontMetrics().elidedText(
             self.movie.title, Qt.ElideRight, self.card_width
         )
@@ -1300,11 +1584,11 @@ class MovieCard(QWidget):
             title,
         )
         painter.setPen(QColor("#8d8d8d"))
-        painter.setFont(QFont("Segoe UI", 8))
+        painter.setFont(app_qfont(8))
         painter.drawText(
             QRect(0, self.card_height + 27, self.card_width, 14),
             Qt.AlignLeft | Qt.AlignVCenter,
-            f"{format_duration(self.movie.duration_ms)}  ·  {format_bytes(self.movie.size)}",
+            f"{format_duration(self.movie.duration_ms)}  Â·  {format_bytes(self.movie.size)}",
         )
 
 
@@ -1316,9 +1600,10 @@ class MovieRow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 8)
         layout.setSpacing(9)
-        heading = QLabel(title)
-        heading.setObjectName("rowHeading")
-        layout.addWidget(heading)
+        if title.strip():
+            heading = QLabel(title)
+            heading.setObjectName("rowHeading")
+            layout.addWidget(heading)
         scroll = QScrollArea()
         scroll.setObjectName("rowScroll")
         scroll.setWidgetResizable(True)
@@ -1340,7 +1625,7 @@ class MovieRow(QWidget):
 
 
 class CollectionCard(QWidget):
-    activated = Signal(object)
+    activated = Signal(object, object)
 
     def __init__(self, collection: LibraryCollection, width: int = 190) -> None:
         super().__init__()
@@ -1348,24 +1633,19 @@ class CollectionCard(QWidget):
         self.card_width = width
         self.card_height = round(width * 1.5)
         self.cover = QPixmap(collection.cover)
-        self.hovered = False
         self.setFixedSize(width, self.card_height + 30)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(collection.title)
 
-    def enterEvent(self, event) -> None:
-        self.hovered = True
-        self.update()
-        super().enterEvent(event)
 
-    def leaveEvent(self, event) -> None:
-        self.hovered = False
-        self.update()
-        super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            self.activated.emit(self.collection)
+            source_rect = QRect(
+                self.mapToGlobal(QPoint(0, 0)),
+                QSize(self.card_width, self.card_height),
+            )
+            self.activated.emit(self.collection, source_rect)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -1379,25 +1659,7 @@ class CollectionCard(QWidget):
         painter.save()
         painter.setClipPath(clip)
         draw_cover(painter, image_rect, self.cover)
-        if self.hovered:
-            painter.fillRect(image_rect, QColor(0, 0, 0, 58))
-            play_rect = QRect(
-                self.card_width // 2 - 24,
-                self.card_height // 2 - 24,
-                48,
-                48,
-            )
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(255, 255, 255, 230))
-            painter.drawEllipse(play_rect)
-            painter.setBrush(QColor("#111111"))
-            painter.drawPolygon(
-                [
-                    QPoint(play_rect.x() + 19, play_rect.y() + 13),
-                    QPoint(play_rect.x() + 19, play_rect.y() + 35),
-                    QPoint(play_rect.x() + 35, play_rect.y() + 24),
-                ]
-            )
+
         painter.restore()
 
         representative = self.collection.representative
@@ -1420,7 +1682,7 @@ class CollectionCard(QWidget):
             )
 
         painter.setPen(QColor("#f2f2f2"))
-        painter.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
+        painter.setFont(app_qfont(10, QFont.DemiBold))
         title = painter.fontMetrics().elidedText(
             self.collection.title, Qt.ElideRight, self.card_width
         )
@@ -1431,7 +1693,7 @@ class CollectionCard(QWidget):
         )
 
 class CollectionRow(QWidget):
-    collection_activated = Signal(object)
+    collection_activated = Signal(object, object)
 
     def __init__(
         self, title: str, collections: list[LibraryCollection]
@@ -1440,9 +1702,10 @@ class CollectionRow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 10)
         layout.setSpacing(9)
-        heading = QLabel(title)
-        heading.setObjectName("rowHeading")
-        layout.addWidget(heading)
+        if title.strip():
+            heading = QLabel(title)
+            heading.setObjectName("rowHeading")
+            layout.addWidget(heading)
         scroll = QScrollArea()
         scroll.setObjectName("rowScroll")
         scroll.setWidgetResizable(True)
@@ -1463,19 +1726,126 @@ class CollectionRow(QWidget):
         layout.addWidget(scroll)
 
 
+class CollectionGrid(QWidget):
+    collection_activated = Signal(object, object)
+
+    CARD_WIDTH = 190
+    CARD_SPACING = 14
+
+    def __init__(
+        self, title: str, collections: list[LibraryCollection]
+    ) -> None:
+        super().__init__()
+        self.collections = collections
+        self.cards: list[CollectionCard] = []
+        self._columns = 0
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 18)
+        layout.setSpacing(12)
+        if title.strip():
+            heading = QLabel(title)
+            heading.setObjectName("rowHeading")
+            layout.addWidget(heading)
+        self.grid_host = QWidget()
+        self.grid_host.setMinimumWidth(0)
+        self.grid_host.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        layout.addWidget(self.grid_host)
+        for collection in collections:
+            card = CollectionCard(collection, self.CARD_WIDTH)
+            card.setParent(self.grid_host)
+            card.activated.connect(self.collection_activated)
+            self.cards.append(card)
+        self._reflow()
+
+    def minimumSizeHint(self) -> QSize:
+        size = super().minimumSizeHint()
+        return QSize(self.CARD_WIDTH, size.height())
+
+    def sizeHint(self) -> QSize:
+        size = super().sizeHint()
+        return QSize(self.CARD_WIDTH, size.height())
+
+    def _target_columns(self) -> int:
+        available_width = max(
+            self.CARD_WIDTH,
+            self.grid_host.width() if self.grid_host.width() > 0 else self.width(),
+        )
+        return max(
+            1,
+            (available_width + self.CARD_SPACING)
+            // (self.CARD_WIDTH + self.CARD_SPACING),
+        )
+
+    def _reflow(self) -> None:
+        columns = self._target_columns()
+        self._columns = columns
+        card_height = 0
+        for index, card in enumerate(self.cards):
+            row, column = divmod(index, columns)
+            card_height = card.height()
+            x = column * (self.CARD_WIDTH + self.CARD_SPACING)
+            y = row * (card.height() + 22)
+            card.setGeometry(x, y, card.width(), card.height())
+            card.show()
+        row_count = (len(self.cards) + columns - 1) // columns if self.cards else 0
+        height = (
+            row_count * card_height + max(0, row_count - 1) * 22
+            if row_count
+            else 0
+        )
+        self.grid_host.setMinimumHeight(height)
+        self.grid_host.setMaximumHeight(height)
+        self.grid_host.updateGeometry()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._reflow()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._reflow()
+
+
+class HomeHeroOverlay(QWidget):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        horizontal = QLinearGradient(0, 0, self.width(), 0)
+        horizontal.setColorAt(0.0, QColor(0, 0, 0, 248))
+        horizontal.setColorAt(0.52, QColor(0, 0, 0, 145))
+        horizontal.setColorAt(1.0, QColor(0, 0, 0, 45))
+        painter.fillRect(self.rect(), horizontal)
+        vertical = QLinearGradient(0, 0, 0, self.height())
+        vertical.setColorAt(0.0, QColor(0, 0, 0, 25))
+        vertical.setColorAt(0.58, QColor(0, 0, 0, 25))
+        vertical.setColorAt(0.84, QColor(5, 5, 5, 185))
+        vertical.setColorAt(1.0, QColor(5, 5, 5, 255))
+        painter.fillRect(self.rect(), vertical)
+
+
 class HeroWidget(QWidget):
     play_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
         self.collection: Optional[LibraryCollection] = None
+        self.movie: Optional[Movie] = None
+        self.preview_path = ""
+        self.preview_started = False
         self.pixmap = QPixmap()
         self.setMinimumHeight(380)
         self.setMaximumHeight(470)
-        layout = QVBoxLayout(self)
+        self.video_surface = MpvPreviewVideoSurface(self)
+        self.preview_controller = MpvController(self.video_surface)
+        self.video_surface.hide()
+        self.overlay = HomeHeroOverlay(self)
+        layout = QVBoxLayout(self.overlay)
         layout.setContentsMargins(50, 40, 50, 50)
         layout.addStretch()
-        self.kicker = QLabel("FEATURED")
+        self.kicker = QLabel("")
         self.kicker.setObjectName("heroKicker")
         self.title = QLabel("")
         self.title.setObjectName("heroTitle")
@@ -1483,8 +1853,11 @@ class HeroWidget(QWidget):
         self.meta = QLabel("")
         self.meta.setObjectName("heroMeta")
         button_row = QHBoxLayout()
-        self.play = QPushButton("▶  Play")
+        self.play = QPushButton("â–¶  Play")
         self.play.setObjectName("heroPlay")
+        self.play.setText("Play")
+        self.play.setIcon(build_solid_play_icon())
+        self.play.setIconSize(QSize(30, 30))
         self.play.clicked.connect(self._emit_play)
         button_row.addWidget(self.play)
         button_row.addStretch()
@@ -1494,18 +1867,33 @@ class HeroWidget(QWidget):
         layout.addSpacing(10)
         layout.addLayout(button_row)
 
-    def set_collection(
-        self, collection: Optional[LibraryCollection]
+    def set_feature(
+        self,
+        collection: Optional[LibraryCollection],
+        movie: Optional[Movie] = None,
     ) -> None:
         self.collection = collection
-        representative = collection.representative if collection else None
-        self.pixmap = (
-            QPixmap(representative.thumbnail or collection.cover)
-            if representative and collection
-            else QPixmap()
+        representative = movie or (collection.representative if collection else None)
+        self.movie = representative
+        new_preview_path = representative.path if representative else ""
+        if new_preview_path != self.preview_path:
+            self.stop_preview()
+            self.preview_path = new_preview_path
+        still_path = episode_still_for_movie(representative) if representative else ""
+        self.pixmap = QPixmap(
+            still_path
+            or (representative.thumbnail if representative else "")
+            or (collection.cover if collection else "")
         )
         if collection and representative:
             self.title.setText(collection.title)
+            self.meta.hide()
+            self.kicker.hide()
+            self.play.setText("Play")
+            self.play.show()
+            self.update()
+            QTimer.singleShot(120, self.start_preview)
+            return
             details = (
                 f"{len(collection.movies)} episodes"
                 if collection.is_series
@@ -1516,7 +1904,7 @@ class HeroWidget(QWidget):
                 if representative.height
                 else "Local video"
             )
-            self.meta.setText(f"{details}   •   {resolution}")
+            self.meta.setText(f"{details}   â€¢   {resolution}")
             self.play.setText(
                 "Episodes" if collection.is_series else "Play"
             )
@@ -1525,26 +1913,54 @@ class HeroWidget(QWidget):
         else:
             self.title.setText("Your library, your files")
             self.meta.setText("Add a video folder to build your library.")
+            self.meta.hide()
             self.play.hide()
             self.kicker.hide()
+            self.stop_preview()
         self.update()
 
     def _emit_play(self) -> None:
-        if self.collection:
-            self.play_requested.emit(self.collection)
+        if self.movie:
+            self.play_requested.emit(self.movie)
+
+    def start_preview(self) -> None:
+        if self.preview_started or not self.preview_path:
+            return
+        self.preview_started = True
+        self.video_surface.setGeometry(self.rect())
+        if self.preview_controller.open_preview(self.preview_path):
+            QTimer.singleShot(220, self._show_preview_surface)
+        else:
+            self.preview_started = False
+
+    def _show_preview_surface(self) -> None:
+        if not self.preview_started:
+            return
+        self.video_surface.setGeometry(self.rect())
+        self.video_surface.show()
+        self.video_surface.lower()
+        self.overlay.raise_()
+
+    def stop_preview(self) -> None:
+        self.preview_started = False
+        try:
+            self.preview_controller.stop()
+        except Exception:
+            pass
+        self.video_surface.hide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.video_surface.setGeometry(self.rect())
+        self.overlay.setGeometry(self.rect())
+        self.video_surface.lower()
+        self.overlay.raise_()
 
     def paintEvent(self, event) -> None:
+        if self.video_surface.isVisible():
+            return
         painter = QPainter(self)
         draw_cover(painter, self.rect(), self.pixmap)
-        horizontal = QLinearGradient(0, 0, self.width(), 0)
-        horizontal.setColorAt(0.0, QColor(0, 0, 0, 245))
-        horizontal.setColorAt(0.52, QColor(0, 0, 0, 115))
-        horizontal.setColorAt(1.0, QColor(0, 0, 0, 20))
-        painter.fillRect(self.rect(), horizontal)
-        vertical = QLinearGradient(0, 0, 0, self.height())
-        vertical.setColorAt(0.55, QColor(0, 0, 0, 0))
-        vertical.setColorAt(1.0, QColor(5, 5, 5, 255))
-        painter.fillRect(self.rect(), vertical)
 
 
 def build_home_refresh_icon() -> QIcon:
@@ -1576,6 +1992,22 @@ def build_home_search_icon() -> QIcon:
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
     renderer.render(painter, QRectF(7, 7, 34, 34))
+    painter.end()
+    return QIcon(pixmap)
+
+
+def build_solid_play_icon(color: str = "#111111") -> QIcon:
+    pixmap = QPixmap(48, 48)
+    pixmap.fill(Qt.transparent)
+    svg = f"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+      <path fill="{color}" d="M17 10L39 24L17 38Z"/>
+    </svg>
+    """
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    renderer.render(painter, QRectF(6, 6, 36, 36))
     painter.end()
     return QIcon(pixmap)
 
@@ -1707,7 +2139,8 @@ class AnimatedSearchBox(QFrame):
 
 class HomePage(QWidget):
     refresh_requested = Signal()
-    movie_activated = Signal(object)
+    movie_activated = Signal(object, object)
+    hero_play_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1723,12 +2156,6 @@ class HomePage(QWidget):
         header_layout.setSpacing(18)
         logo = QLabel("D")
         logo.setObjectName("brandLogo")
-        brand = QLabel("DORDIEWATCH")
-        brand.setObjectName("brandName")
-        home = QLabel("Home")
-        home.setObjectName("navActive")
-        library = QLabel("My Library")
-        library.setObjectName("navItem")
         self.search_box = AnimatedSearchBox(header)
         self.search = self.search_box.edit
         self.refresh_button = HomeIconButton()
@@ -1742,10 +2169,6 @@ class HomePage(QWidget):
         header_controls_layout.setSpacing(0)
         header_controls_layout.addWidget(self.refresh_button)
         header_layout.addWidget(logo)
-        header_layout.addWidget(brand)
-        header_layout.addSpacing(15)
-        header_layout.addWidget(home)
-        header_layout.addWidget(library)
         header_layout.addStretch()
         header_layout.addWidget(self.header_controls)
         root.addWidget(header)
@@ -1770,20 +2193,19 @@ class HomePage(QWidget):
         self.content = QWidget()
         self.content.setObjectName("homeContent")
         self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(0, 0, 0, 45)
+        self.content_layout.setContentsMargins(0, 30, 0, 45)
         self.content_layout.setSpacing(8)
-        self.hero = HeroWidget()
-        self.hero.play_requested.connect(self.movie_activated)
-        self.content_layout.addWidget(self.hero)
+
         self.rows = QWidget()
         self.rows_layout = QVBoxLayout(self.rows)
-        self.rows_layout.setContentsMargins(38, 0, 0, 0)
-        self.rows_layout.setSpacing(5)
+        self.rows_layout.setContentsMargins(38, 0, 38, 0)
+        self.rows_layout.setSpacing(14)
         self.content_layout.addWidget(self.rows)
         self.content_layout.addStretch()
         self.scroll.setWidget(self.content)
         root.addWidget(self.scroll, 1)
 
+        self.scroll.verticalScrollBar().valueChanged.connect(self._update_header_background)
         self.refresh_button.clicked.connect(self.refresh_requested)
         self.search_box.width_changed.connect(self._position_search_box)
         self.header.installEventFilter(self)
@@ -1791,7 +2213,21 @@ class HomePage(QWidget):
         self.refresh_button.installEventFilter(self)
         self._search_position_pending = False
         self.search_box.raise_()
+        self._update_header_background(0)
         self._schedule_position_search_box()
+
+    def _update_header_background(self, value: Optional[int] = None) -> None:
+        if value is None:
+            value = self.scroll.verticalScrollBar().value()
+        opacity = max(0.0, min(1.0, value / 90.0))
+        background_alpha = int(245 * opacity)
+        border_alpha = int(255 * opacity)
+        self.header.setStyleSheet(
+            "QFrame#homeHeader {"
+            f"background: rgba(16, 16, 16, {background_alpha});"
+            f"border-bottom: 1px solid rgba(29, 29, 29, {border_alpha});"
+            "}"
+        )
 
     def _schedule_position_search_box(self) -> None:
         if self._search_position_pending:
@@ -1861,45 +2297,15 @@ class HomePage(QWidget):
                 for word in words
             )
         ]
-        featured = max(
-            filtered or collections,
-            key=lambda collection: (
-                collection.last_played or collection.modified
-            ),
-            default=None,
-        )
-        self.hero.set_collection(featured)
-
-        continue_watching = sorted(
-            [
-                collection
-                for collection in filtered
-                if any(
-                    movie.progress_ms > 20_000
-                    and movie.duration_ms
-                    and movie.progress_ms < movie.duration_ms * 0.92
-                    for movie in collection.movies
-                )
-            ],
-            key=lambda collection: collection.last_played,
-            reverse=True,
-        )
-        if continue_watching and not words:
-            self._add_collection_row(
-                "Continue Watching", continue_watching
-            )
         if filtered:
-            self._add_collection_row(
-                "Search Results" if words else "My Library",
-                filtered,
-            )
+            self._add_collection_row("", filtered)
 
         if not collections or (words and not filtered):
             empty = QLabel(
                 (
                     "No matching titles"
                     if words
-                    else "No titles yet\n\nPut each movie or series in its own folder inside “videos”."
+                    else "No titles yet\n\nPut each movie or series in its own folder inside â€œvideosâ€."
                 )
             )
             empty.setObjectName("homeEmpty")
@@ -1910,7 +2316,7 @@ class HomePage(QWidget):
     def _add_collection_row(
         self, title: str, collections: list[LibraryCollection]
     ) -> None:
-        row = CollectionRow(title, collections)
+        row = CollectionGrid(title, collections)
         row.collection_activated.connect(self.movie_activated)
         self.rows_layout.addWidget(row)
 
@@ -1932,6 +2338,874 @@ class PosterWidget(QWidget):
         clip.addRoundedRect(self.rect(), 8, 8)
         painter.setClipPath(clip)
         draw_cover(painter, self.rect(), self.pixmap)
+
+
+class EpisodeListItem(QWidget):
+    activated = Signal(object)
+
+    def __init__(self, index: int, movie: Movie) -> None:
+        super().__init__()
+        self.index = index
+        self.movie = movie
+        still_path = episode_still_for_movie(movie)
+        self.thumbnail = QPixmap(still_path)
+        self.current_pixmap = self.thumbnail
+        self.preview_pixmaps: list[QPixmap] = []
+        self.preview_index = 0
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setInterval(310)
+        self.preview_timer.timeout.connect(self._advance_preview)
+        self.hovered = False
+        self.setMinimumHeight(124)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+
+    def enterEvent(self, event) -> None:
+        self.hovered = True
+        self.preview_pixmaps = [
+            QPixmap(path)
+            for path in usable_episode_preview_frames(self.movie)
+        ]
+        self.preview_pixmaps = [
+            pixmap for pixmap in self.preview_pixmaps if not pixmap.isNull()
+        ]
+        if len(self.preview_pixmaps) > 1:
+            self.preview_index = 0
+            self.current_pixmap = self.preview_pixmaps[0]
+            self.preview_timer.start()
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.hovered = False
+        self.preview_timer.stop()
+        self.preview_pixmaps.clear()
+        self.current_pixmap = self.thumbnail
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.activated.emit(self.movie)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _advance_preview(self) -> None:
+        if not self.preview_pixmaps:
+            self.preview_timer.stop()
+            return
+        self.preview_index = (self.preview_index + 1) % len(self.preview_pixmaps)
+        self.current_pixmap = self.preview_pixmaps[self.preview_index]
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QColor("#dcdcdc"))
+        painter.setFont(app_qfont(18, QFont.Normal))
+        number_rect = QRect(18, 0, 42, self.height())
+        painter.drawText(number_rect, Qt.AlignCenter, str(self.index))
+
+        thumb_width = 150
+        thumb_height = 84
+        thumb_rect = QRect(74, (self.height() - thumb_height) // 2, thumb_width, thumb_height)
+        clip = QPainterPath()
+        clip.addRoundedRect(thumb_rect, 4, 4)
+        painter.save()
+        painter.setClipPath(clip)
+        draw_cover(painter, thumb_rect, self.current_pixmap)
+        if self.hovered:
+            painter.fillRect(thumb_rect, QColor(0, 0, 0, 48))
+            center = thumb_rect.center()
+            radius = 25
+            play_rect = QRect(center.x() - radius, center.y() - radius, radius * 2, radius * 2)
+            painter.setBrush(QColor(0, 0, 0, 50))
+            painter.setPen(QPen(QColor(255, 255, 255, 230), 1.6))
+            painter.drawEllipse(play_rect)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 245))
+            painter.drawPolygon(
+                [
+                    QPoint(center.x() - 7, center.y() - 13),
+                    QPoint(center.x() - 7, center.y() + 13),
+                    QPoint(center.x() + 14, center.y()),
+                ]
+            )
+        painter.restore()
+
+        duration = format_episode_runtime(self.movie.duration_ms)
+        if duration:
+            painter.setPen(QColor("#f2f2f2"))
+            painter.setFont(app_qfont(12, QFont.Bold))
+            painter.drawText(
+                QRect(self.width() - 96, 24, 72, 28),
+                Qt.AlignRight | Qt.AlignVCenter,
+                duration,
+            )
+
+        text_left = thumb_rect.right() + 18
+        text_right = self.width() - 112
+        painter.setPen(QColor("#ffffff"))
+        painter.setFont(app_qfont(11, QFont.DemiBold))
+        title = f"Episode {self.index}"
+        title = painter.fontMetrics().elidedText(
+            title, Qt.ElideRight, max(80, text_right - text_left)
+        )
+        painter.drawText(
+            QRect(text_left, 29, max(80, text_right - text_left), 24),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            title,
+        )
+
+
+class EpisodeRangeButton(QToolButton):
+    def __init__(self, label: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._arrow_progress = 0.0
+        self.arrow_animation = QPropertyAnimation(self, b"arrowProgress", self)
+        self.arrow_animation.setDuration(150)
+        self.arrow_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.setObjectName("seriesEpisodeRangeButton")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setPopupMode(QToolButton.InstantPopup)
+        self.setText(label)
+        self.setFont(app_qfont(11, QFont.DemiBold))
+        self.setMinimumSize(198, 40)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def sizeHint(self) -> QSize:
+        metrics = self.fontMetrics()
+        return QSize(max(198, metrics.horizontalAdvance(self.text()) + 62), 40)
+
+    def arrow_progress(self) -> float:
+        return self._arrow_progress
+
+    def set_arrow_progress(self, value: float) -> None:
+        self._arrow_progress = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    arrowProgress = Property(float, arrow_progress, set_arrow_progress)
+
+    def set_menu_open(self, opened: bool) -> None:
+        self.arrow_animation.stop()
+        self.arrow_animation.setStartValue(self._arrow_progress)
+        self.arrow_animation.setEndValue(1.0 if opened else 0.0)
+        self.arrow_animation.start()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        border_rect = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
+        painter.setPen(QPen(QColor("#6a6a6a" if self.underMouse() else "#585858"), 1))
+        painter.setBrush(QColor("#242424"))
+        painter.drawRoundedRect(border_rect, 3, 3)
+
+        text_rect = rect.adjusted(12, 0, -46, 0)
+        painter.setPen(QColor("#ffffff"))
+        painter.setFont(app_qfont(11, QFont.DemiBold))
+        label = painter.fontMetrics().elidedText(self.text(), Qt.ElideRight, text_rect.width())
+        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, label)
+
+        progress = self._arrow_progress
+        center = QPoint(rect.right() - 21, rect.center().y())
+        top_y = -3 + (6 * progress)
+        tip_y = 4 - (8 * progress)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawPolygon(
+            [
+                QPointF(center.x() - 5, center.y() + top_y),
+                QPointF(center.x() + 5, center.y() + top_y),
+                QPointF(center.x(), center.y() + tip_y),
+            ]
+        )
+
+class ThinCloseButton(QToolButton):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("seriesClose")
+        self.setFixedSize(40, 40)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAutoRaise(False)
+        self.setFocusPolicy(Qt.NoFocus)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(20, 20, 20, 220))
+        painter.drawEllipse(self.rect().adjusted(0, 0, -1, -1))
+        pen = QPen(QColor("#ffffff"), 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        center = self.rect().center()
+        half = 6
+        painter.drawLine(
+            center.x() - half,
+            center.y() - half,
+            center.x() + half,
+            center.y() + half,
+        )
+        painter.drawLine(
+            center.x() + half,
+            center.y() - half,
+            center.x() - half,
+            center.y() + half,
+        )
+
+
+class SeriesHeroOverlay(QWidget):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        horizontal = QLinearGradient(0, 0, self.width(), 0)
+        horizontal.setColorAt(0.0, QColor(0, 0, 0, 225))
+        horizontal.setColorAt(0.50, QColor(0, 0, 0, 90))
+        horizontal.setColorAt(1.0, QColor(0, 0, 0, 20))
+        painter.fillRect(self.rect(), horizontal)
+        vertical = QLinearGradient(0, 0, 0, self.height())
+        vertical.setColorAt(0.0, QColor(0, 0, 0, 15))
+        vertical.setColorAt(0.58, QColor(0, 0, 0, 30))
+        vertical.setColorAt(0.82, QColor(24, 24, 24, 175))
+        vertical.setColorAt(1.0, QColor(24, 24, 24, 255))
+        painter.fillRect(self.rect(), vertical)
+
+
+class SeriesHero(QWidget):
+    play_requested = Signal()
+    close_requested = Signal()
+
+    def __init__(self, collection: LibraryCollection) -> None:
+        super().__init__()
+        self.collection = collection
+        representative = collection.representative
+        self.pixmap = QPixmap(representative.thumbnail or collection.cover)
+        self.preview_path = representative.path
+        self.preview_started = False
+        self.setMinimumHeight(430)
+        self.setMaximumHeight(520)
+        self.video_surface = MpvPreviewVideoSurface(self)
+        self.preview_controller = MpvController(self.video_surface)
+        self.video_surface.hide()
+        self.overlay = SeriesHeroOverlay(self)
+        self.overlay.setObjectName("seriesHeroOverlay")
+        layout = QVBoxLayout(self.overlay)
+        layout.setContentsMargins(48, 20, 20, 38)
+        top = QHBoxLayout()
+        top.addStretch()
+        close_button = ThinCloseButton()
+        close_button.clicked.connect(self.close_requested)
+        top.addWidget(close_button)
+        layout.addLayout(top)
+        layout.addStretch()
+        self.title = QLabel(collection.title)
+        self.title.setObjectName("seriesTitle")
+        self.meta = QLabel(f"{len(collection.movies)} Episodes")
+        self.meta.setObjectName("seriesMeta")
+        self.meta.setVisible(len(collection.movies) > 1)
+        self.play = QPushButton("â–¶  Play")
+        self.play.setObjectName("seriesPlay")
+        self.play.setText("Play")
+        self.play.setIcon(build_solid_play_icon())
+        self.play.setIconSize(QSize(30, 30))
+        self.play.setFixedWidth(132)
+        self.play.clicked.connect(self.play_requested)
+        layout.addWidget(self.title)
+        layout.addSpacing(8)
+        layout.addWidget(self.play)
+        if len(collection.movies) > 1:
+            layout.addSpacing(18)
+            layout.addWidget(self.meta)
+
+    def start_preview(self) -> None:
+        if self.preview_started:
+            return
+        self.preview_started = True
+        if self.preview_controller.open_preview(self.preview_path):
+            self.video_surface.show()
+            self.video_surface.lower()
+            self.overlay.raise_()
+
+    def stop_preview(self) -> None:
+        self.preview_started = False
+        self.preview_controller.stop()
+        if hasattr(self.video_surface, "detach_player"):
+            self.video_surface.detach_player()
+        self.video_surface.hide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.video_surface.setGeometry(self.rect())
+        self.overlay.setGeometry(self.rect())
+        self.video_surface.lower()
+        self.overlay.raise_()
+
+    def paintEvent(self, event) -> None:
+        if self.video_surface.isVisible():
+            return
+        painter = QPainter(self)
+        draw_cover(painter, self.rect(), self.pixmap)
+
+
+class PopupSnapshot(QWidget):
+    def __init__(
+        self,
+        pixmap: QPixmap,
+        target_geometry: QRect,
+        parent: QWidget,
+        start_geometry: Optional[QRect] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.pixmap = pixmap
+        self.target_geometry = QRect(target_geometry)
+        self.start_geometry = QRect(start_geometry or target_geometry)
+        self._progress = 0.0
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setGeometry(parent.rect())
+
+    def _get_progress(self) -> float:
+        return self._progress
+
+    def _set_progress(self, value: float) -> None:
+        self._progress = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    progress = Property(float, _get_progress, _set_progress)
+
+    def paintEvent(self, event) -> None:
+        if self.pixmap.isNull():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        progress = self._progress
+        eased = 1.0 - pow(1.0 - progress, 3)
+        start = self.start_geometry
+        end = self.target_geometry
+        x = int(start.x() + (end.x() - start.x()) * eased)
+        y = int(start.y() + (end.y() - start.y()) * eased)
+        width = max(1, int(start.width() + (end.width() - start.width()) * eased))
+        height = max(1, int(start.height() + (end.height() - start.height()) * eased))
+        target = QRect(
+            x,
+            y,
+            width,
+            height,
+        )
+        painter.setOpacity(progress)
+        painter.setRenderHint(QPainter.Antialiasing)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(target), 14, 14)
+        painter.setClipPath(clip)
+        painter.drawPixmap(target, self.pixmap)
+
+
+class PlayerLaunchTransitionOverlay(QWidget):
+    black_reached = Signal()
+    finished = Signal()
+
+    def __init__(self, pixmap: QPixmap, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.base_pixmap = pixmap.scaled(
+            parent.size(),
+            Qt.IgnoreAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self._progress = 0.0
+        self.animation = QPropertyAnimation(self, b"progress", self)
+        self.animation.setDuration(700)
+        self.animation.setEasingCurve(QEasingCurve.InOutCubic)
+        self.animation.setStartValue(0.0)
+        self.animation.setEndValue(1.0)
+        self.animation.finished.connect(self._black_reached)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setGeometry(parent.rect())
+
+    def _get_progress(self) -> float:
+        return self._progress
+
+    def _set_progress(self, value: float) -> None:
+        self._progress = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    progress = Property(float, _get_progress, _set_progress)
+
+    def start(self) -> None:
+        self.show()
+        self.raise_()
+        self.animation.start()
+
+    def _black_reached(self) -> None:
+        self._progress = 1.0
+        self.update()
+        self.black_reached.emit()
+
+    def finish(self) -> None:
+        self.hide()
+        self.finished.emit()
+        self.deleteLater()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        progress = self._progress
+        painter.fillRect(self.rect(), QColor("#000000"))
+        scale = 1.0 + (0.095 * progress)
+        width = max(1, int(self.width() * scale))
+        height = max(1, int(self.height() * scale))
+        target = QRect(
+            (self.width() - width) // 2,
+            (self.height() - height) // 2,
+            width,
+            height,
+        )
+        painter.setOpacity(max(0.0, 1.0 - progress * 0.18))
+        painter.drawPixmap(target, self.base_pixmap)
+
+        black_progress = max(0.0, (progress - 0.18) / 0.82)
+        painter.setOpacity(min(1.0, black_progress * 1.12))
+        painter.fillRect(self.rect(), QColor("#000000"))
+
+
+class SeriesDetailsDialog(QWidget):
+    movie_activated = Signal(object)
+    finished = Signal()
+
+    def __init__(
+        self,
+        collection: LibraryCollection,
+        parent: Optional[QWidget] = None,
+        origin_geometry: Optional[QRect] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.collection = collection
+        self.origin_geometry = QRect(origin_geometry) if origin_geometry is not None else None
+        self._closing_animation_started = False
+        self._launching_player = False
+        self._finished_emitted = False
+        self.snapshot_overlay: Optional[PopupSnapshot] = None
+        self.popup_animation: Optional[QPropertyAnimation] = None
+        self.close_animation_group: Optional[QParallelAnimationGroup] = None
+        self._popup_final_geometry: Optional[QRect] = None
+        self.setObjectName("seriesDialog")
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setAttribute(Qt.WA_StyledBackground)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self.hero = SeriesHero(collection)
+        self.hero.close_requested.connect(self.request_close)
+        self.hero.play_requested.connect(lambda: self._play_movie(collection.representative))
+
+        scroll = QScrollArea()
+        scroll.setObjectName("seriesScroll")
+        self.scroll = scroll
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        content = QWidget()
+        content.setObjectName("seriesContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 28, 0, 28)
+        content_layout.setSpacing(0)
+        content_layout.setAlignment(Qt.AlignTop)
+        self.panel = QWidget()
+        self.panel.setObjectName("seriesPanel")
+        self.panel.setMinimumWidth(720)
+        panel_layout = QVBoxLayout(self.panel)
+        panel_layout.setContentsMargins(0, 0, 0, 42)
+        panel_layout.setSpacing(0)
+        panel_layout.setAlignment(Qt.AlignTop)
+        panel_layout.addWidget(self.hero)
+
+        self.episode_page_start = 0
+        self.episode_page_size = 12
+        self.episodes_shell: Optional[QWidget] = None
+        self.episodes_layout: Optional[QVBoxLayout] = None
+        if len(collection.movies) > 1:
+            self.episodes_shell = QWidget()
+            self.episodes_layout = QVBoxLayout(self.episodes_shell)
+            self.episodes_layout.setContentsMargins(48, 28, 48, 0)
+            self.episodes_layout.setSpacing(0)
+            self._rebuild_episode_rows()
+            panel_layout.addWidget(self.episodes_shell)
+        else:
+            panel_layout.addStretch()
+        content_layout.addWidget(self.panel, 0, Qt.AlignHCenter | Qt.AlignTop)
+        self._outside_click_widgets = {content, scroll.viewport()}
+        content.installEventFilter(self)
+        scroll.viewport().installEventFilter(self)
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
+
+    def set_collection(self, collection: LibraryCollection) -> None:
+        self.collection = collection
+        self.hero.collection = collection
+        self.hero.title.setText(collection.title)
+        self.hero.meta.setText(f"{len(collection.movies)} Episodes")
+        self.hero.meta.setVisible(len(collection.movies) > 1)
+        try:
+            self.hero.play_requested.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self.hero.play_requested.connect(
+            lambda: self._play_movie(collection.representative)
+        )
+        self.episode_page_start = 0
+        self._rebuild_episode_rows()
+
+    def _clear_layout(self, layout: QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            child = item.widget()
+            child_layout = item.layout()
+            if child is not None:
+                child.deleteLater()
+            elif child_layout is not None:
+                self._clear_layout(child_layout)
+
+    def _episode_range_label(self, start: int, end: int) -> str:
+        if start == end:
+            return f"Episode {start}"
+        if end == start + 1:
+            return f"Episode {start} and {end}"
+        return f"Episodes {start} - {end}"
+
+    def _episode_ranges(self) -> list[tuple[int, int]]:
+        total = len(self.collection.movies)
+        page_size = self.episode_page_size
+        return [
+            (start, min(start + page_size, total))
+            for start in range(0, total, page_size)
+        ]
+
+    def _set_episode_page(self, start: int) -> None:
+        self.episode_page_start = start
+        self._rebuild_episode_rows()
+
+    def _build_episode_range_button(self) -> QToolButton:
+        ranges = self._episode_ranges()
+        selected_start = min(self.episode_page_start, max(0, len(self.collection.movies) - 1))
+        selected_range = next(
+            ((start, end) for start, end in ranges if start <= selected_start < end),
+            ranges[0],
+        )
+        self.episode_page_start = selected_range[0]
+        button = EpisodeRangeButton(
+            self._episode_range_label(selected_range[0] + 1, selected_range[1])
+        )
+        menu = QMenu(button)
+        menu.setObjectName("seriesEpisodeRangeMenu")
+
+        def sync_menu_width() -> None:
+            menu.setFixedWidth(button.width())
+            button.set_menu_open(True)
+
+        menu.aboutToShow.connect(sync_menu_width)
+        menu.aboutToHide.connect(lambda: button.set_menu_open(False))
+        for start, end in ranges:
+            label = self._episode_range_label(start + 1, end)
+            action = menu.addAction(label)
+            action.triggered.connect(lambda _checked=False, page_start=start: self._set_episode_page(page_start))
+        button.setMenu(menu)
+        return button
+
+    def _rebuild_episode_rows(self) -> None:
+        if self.episodes_layout is None:
+            return
+        self._clear_layout(self.episodes_layout)
+        total = len(self.collection.movies)
+        if self.episode_page_start >= total:
+            self.episode_page_start = 0
+        heading_row = QHBoxLayout()
+        heading = QLabel("Episodes")
+        heading.setObjectName("seriesEpisodesHeading")
+        heading_row.addWidget(heading)
+        heading_row.addStretch()
+        if total > self.episode_page_size:
+            heading_row.addWidget(self._build_episode_range_button())
+        else:
+            series_name = QLabel(self.collection.title)
+            series_name.setObjectName("seriesEpisodesName")
+            heading_row.addWidget(series_name)
+        self.episodes_layout.addLayout(heading_row)
+        self.episodes_layout.addSpacing(16)
+
+        start = self.episode_page_start
+        end = min(start + self.episode_page_size, total)
+        visible_movies = self.collection.movies[start:end]
+        for offset, movie in enumerate(visible_movies):
+            episode_number = start + offset + 1
+            item = EpisodeListItem(episode_number, movie)
+            item.activated.connect(self._play_movie)
+            self.episodes_layout.addWidget(item)
+            if offset != len(visible_movies) - 1:
+                divider = QFrame()
+                divider.setObjectName("seriesEpisodeDivider")
+                divider.setFixedHeight(1)
+                self.episodes_layout.addWidget(divider)
+        self.episodes_layout.addStretch()
+
+    def show_centered(self) -> None:
+        final_geometry = self._centered_geometry()
+        self._popup_final_geometry = QRect(final_geometry)
+        start_pos = QPoint(final_geometry.x(), final_geometry.y())
+        self.setGeometry(final_geometry)
+        self.move(start_pos)
+        self._update_panel_width()
+        self._apply_rounded_mask()
+        self.ensurePolished()
+        if self.layout() is not None:
+            self.layout().activate()
+
+        parent = self.parentWidget()
+        effect = QGraphicsOpacityEffect(self)
+        effect.setOpacity(0.0)
+        self.setGraphicsEffect(effect)
+        self.show()
+        self.raise_()
+        self.setFocus(Qt.OtherFocusReason)
+        QTimer.singleShot(0, self._update_panel_width)
+
+        if parent is None:
+            effect.setOpacity(1.0)
+            self.setGraphicsEffect(None)
+            self.setGeometry(final_geometry)
+            QTimer.singleShot(80, self.hero.start_preview)
+            return
+
+        group = QParallelAnimationGroup(self)
+        self.popup_animation = group
+
+        position_animation = QPropertyAnimation(self, b"pos", group)
+        position_animation.setDuration(460)
+        position_animation.setEasingCurve(QEasingCurve.OutCubic)
+        position_animation.setStartValue(start_pos)
+        position_animation.setEndValue(final_geometry.topLeft())
+
+        opacity_animation = QPropertyAnimation(effect, b"opacity", group)
+        opacity_animation.setDuration(430)
+        opacity_animation.setEasingCurve(QEasingCurve.OutCubic)
+        opacity_animation.setStartValue(0.0)
+        opacity_animation.setEndValue(1.0)
+
+        group.addAnimation(position_animation)
+        group.addAnimation(opacity_animation)
+        group.finished.connect(lambda active=effect: self._finish_open_animation(active))
+        group.start()
+        QTimer.singleShot(620, lambda active=effect: self._finish_open_animation(active))
+
+    def _render_snapshot(self) -> QPixmap:
+        pixmap = QPixmap(self.size())
+        pixmap.fill(Qt.transparent)
+        self.render(pixmap)
+        return pixmap
+
+    def _default_start_geometry(self, final_geometry: QRect) -> QRect:
+        start = QRect(final_geometry)
+        start.moveTop(final_geometry.y() + 18)
+        return start
+
+    def _center_scaled_geometry(self, geometry: QRect, scale: float) -> QRect:
+        target = QRect(geometry)
+        target.moveTop(geometry.y() + 22)
+        return target
+
+    def _finish_open_animation(self, effect: QGraphicsOpacityEffect) -> None:
+        if self._closing_animation_started:
+            return
+        if self.popup_animation is not None:
+            self.popup_animation.stop()
+            self.popup_animation = None
+        final_geometry = self._popup_final_geometry or self._centered_geometry()
+        self.setGeometry(final_geometry)
+        effect.setOpacity(1.0)
+        self.setGraphicsEffect(None)
+        self.raise_()
+        self.setFocus(Qt.OtherFocusReason)
+        QTimer.singleShot(80, self.hero.start_preview)
+
+
+    def _centered_geometry(self) -> QRect:
+        parent = self.parentWidget()
+        if not parent:
+            return self.geometry()
+        return QRect(parent.rect())
+
+    def _panel_width(self) -> int:
+        parent = self.parentWidget()
+        if not parent:
+            return 980
+        return min(980, max(740, int(parent.width() * 0.70)))
+
+    def _update_panel_width(self) -> None:
+        if hasattr(self, "panel"):
+            self.panel.setFixedWidth(self._panel_width())
+            if len(self.collection.movies) == 1:
+                viewport_height = max(
+                    self.height(),
+                    self.scroll.viewport().height()
+                    if hasattr(self, "scroll")
+                    else 0,
+                )
+                outer_gap = 28 * 2
+                target_height = max(
+                    self.hero.minimumHeight() + 42,
+                    viewport_height - outer_gap,
+                )
+                self.panel.setFixedHeight(target_height)
+                self.panel.updateGeometry()
+            else:
+                self.panel.setMinimumHeight(0)
+                self.panel.setMaximumHeight(16777215)
+
+    def recenter(self) -> None:
+        if not self._closing_animation_started:
+            if self.popup_animation is not None:
+                self.popup_animation.stop()
+                self.popup_animation = None
+            if self.snapshot_overlay is not None:
+                self.snapshot_overlay.hide()
+                self.snapshot_overlay.deleteLater()
+                self.snapshot_overlay = None
+            self.setGeometry(self._centered_geometry())
+
+    def closeEvent(self, event) -> None:
+        if self._closing_animation_started:
+            event.ignore()
+            return
+        event.ignore()
+        self.request_close()
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            watched in getattr(self, "_outside_click_widgets", set())
+            and event.type() == QEvent.MouseButtonPress
+            and hasattr(event, "button")
+            and event.button() == Qt.LeftButton
+        ):
+            position = event.globalPosition().toPoint()
+            panel_position = self.panel.mapFromGlobal(position)
+            if not self.panel.rect().contains(panel_position):
+                self.request_close()
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+    def request_close(self) -> None:
+        self._start_close_animation()
+
+    def _start_close_animation(self) -> None:
+        if self._closing_animation_started:
+            return
+        self._closing_animation_started = True
+        parent = self.parentWidget()
+        if self.popup_animation is not None:
+            self.popup_animation.stop()
+            self.popup_animation = None
+        if self.snapshot_overlay is not None:
+            self.snapshot_overlay.hide()
+            self.snapshot_overlay.deleteLater()
+            self.snapshot_overlay = None
+
+        if self.close_animation_group is not None:
+            self.close_animation_group.stop()
+            self.close_animation_group = None
+
+        if parent is None or not self.isVisible():
+            QTimer.singleShot(30, self._finish_close_animation)
+            return
+
+        current_geometry = self.geometry()
+        end_geometry = self._center_scaled_geometry(current_geometry, 0.72)
+        try:
+            self.hero.stop_preview()
+        except Exception:
+            pass
+        effect = self.graphicsEffect()
+        if not isinstance(effect, QGraphicsOpacityEffect):
+            effect = QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(effect)
+        effect.setOpacity(1.0)
+        if parent is not None and hasattr(parent, "_hide_series_backdrop"):
+            parent._hide_series_backdrop()
+        group = QParallelAnimationGroup(self)
+        self.close_animation_group = group
+
+        position_animation = QPropertyAnimation(self, b"pos", group)
+        position_animation.setDuration(360)
+        position_animation.setEasingCurve(QEasingCurve.InCubic)
+        position_animation.setStartValue(current_geometry.topLeft())
+        position_animation.setEndValue(end_geometry.topLeft())
+
+        opacity_animation = QPropertyAnimation(effect, b"opacity", group)
+        opacity_animation.setDuration(360)
+        opacity_animation.setEasingCurve(QEasingCurve.InCubic)
+        opacity_animation.setStartValue(1.0)
+        opacity_animation.setEndValue(0.0)
+
+        group.addAnimation(position_animation)
+        group.addAnimation(opacity_animation)
+        group.finished.connect(self._finish_close_animation)
+        group.start()
+        QTimer.singleShot(500, self._finish_close_animation)
+
+    def _finish_close_animation(self) -> None:
+        if self._finished_emitted:
+            return
+        self.hide()
+        effect = self.graphicsEffect()
+        if isinstance(effect, QGraphicsOpacityEffect):
+            effect.setOpacity(0.0)
+        self.setGraphicsEffect(None)
+        parent = self.parentWidget()
+        if parent is not None and hasattr(parent, "_finish_series_backdrop_hide"):
+            parent._finish_series_backdrop_hide()
+        if self.popup_animation is not None:
+            self.popup_animation.stop()
+            self.popup_animation = None
+        if self.close_animation_group is not None:
+            self.close_animation_group.stop()
+            self.close_animation_group = None
+        if self.snapshot_overlay is not None:
+            self.snapshot_overlay.hide()
+            self.snapshot_overlay.deleteLater()
+            self.snapshot_overlay = None
+        try:
+            self.hero.stop_preview()
+        except Exception:
+            pass
+        self._finished_emitted = True
+        self.finished.emit()
+        self.deleteLater()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.request_close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_panel_width()
+        self._apply_rounded_mask()
+
+    def _apply_rounded_mask(self) -> None:
+        self.clearMask()
+
+    def _play_movie(self, movie: Movie) -> None:
+        if self._launching_player:
+            return
+        self._launching_player = True
+        self.movie_activated.emit(movie)
 
 
 class CollectionPage(QWidget):
@@ -2050,12 +3324,42 @@ class MpvVideoSurface(QOpenGLWidget):
         super().__init__(parent)
         self.player = None
         self.render_context = None
+        self.render_qt_context = None
         self._gl_proc_callback = None
+        self._last_paint_signature = None
+        self._last_paint_log_at = 0.0
+        self._last_resize_signature = None
+        self.rendering_suspended = False
+        self._suspend_skip_logged = False
         self.setAutoFillBackground(False)
         self.frame_update_requested.connect(self.update)
+        diagnostic_log("video_surface.init", surface=widget_snapshot(self))
+
+    def set_rendering_suspended(self, suspended: bool, reason: str = "") -> None:
+        suspended = bool(suspended)
+        if self.rendering_suspended == suspended:
+            return
+        self.rendering_suspended = suspended
+        self._suspend_skip_logged = False
+        diagnostic_log(
+            "video_surface.rendering_suspended",
+            suspended=suspended,
+            reason=reason,
+            surface=widget_snapshot(self),
+        )
+        if suspended:
+            self._free_render_context(make_current=True)
+        else:
+            self.update()
 
     def attach_player(self, player) -> None:
         self.player = player
+        diagnostic_log(
+            "video_surface.attach_player",
+            player_id=id(player),
+            context_id=id(self.context()) if self.context() is not None else "none",
+            surface=widget_snapshot(self),
+        )
         if self.context() is not None and self.context().isValid():
             try:
                 self.makeCurrent()
@@ -2065,44 +3369,373 @@ class MpvVideoSurface(QOpenGLWidget):
         self.update()
 
     def detach_player(self) -> None:
-        if self.render_context is not None:
-            try:
-                self.makeCurrent()
-                self.render_context.free()
-            except Exception:
-                pass
-            finally:
-                self.render_context = None
-                self.doneCurrent()
+        diagnostic_log("video_surface.detach_player", surface=widget_snapshot(self))
+        self._free_render_context(make_current=True)
         self.player = None
 
     def initializeGL(self) -> None:
+        context = QOpenGLContext.currentContext()
+        diagnostic_log(
+            "video_surface.initialize_gl",
+            context_id=id(context) if context is not None else "none",
+            valid=bool(context and context.isValid()),
+            surface=widget_snapshot(self),
+        )
+        if context is not None:
+            try:
+                context.aboutToBeDestroyed.connect(self._context_about_to_be_destroyed)
+            except (RuntimeError, TypeError):
+                pass
         self._ensure_render_context()
 
     def paintGL(self) -> None:
+        if self.rendering_suspended:
+            if not self._suspend_skip_logged:
+                self._suspend_skip_logged = True
+                diagnostic_log(
+                    "video_surface.paint.skipped_suspended",
+                    surface=widget_snapshot(self),
+                )
+            return
+        context = QOpenGLContext.currentContext()
+        if self.render_context is not None and context is not self.render_qt_context:
+            diagnostic_log(
+                "video_surface.context_changed",
+                old_context_id=id(self.render_qt_context)
+                if self.render_qt_context is not None
+                else "none",
+                new_context_id=id(context) if context is not None else "none",
+                surface=widget_snapshot(self),
+            )
+            self._free_render_context(make_current=False)
+        if self.rendering_suspended:
+            return
+        self._ensure_render_context()
+        render_context = self.render_context
+        if render_context is None or self.rendering_suspended:
+            return
+        scale = self.devicePixelRatioF()
+        width = max(1, int(self.width() * scale))
+        height = max(1, int(self.height() * scale))
+        fbo = int(self.defaultFramebufferObject())
+        signature = (
+            width,
+            height,
+            fbo,
+            id(context) if context is not None else 0,
+            id(self.render_context),
+        )
+        now = time.monotonic()
+        if signature != self._last_paint_signature or now - self._last_paint_log_at > 1.5:
+            self._last_paint_signature = signature
+            self._last_paint_log_at = now
+            diagnostic_log(
+                "video_surface.paint",
+                target=f"{width}x{height}",
+                widget=f"{self.width()}x{self.height()}",
+                dpr=f"{scale:.3f}",
+                fbo=fbo,
+                context_id=id(context) if context is not None else "none",
+                render_context_id=id(render_context),
+            )
+        try:
+            if self.rendering_suspended:
+                return
+            render_context.update()
+            if self.rendering_suspended:
+                return
+            render_context.render(
+                opengl_fbo={
+                    "w": width,
+                    "h": height,
+                    "fbo": fbo,
+                    "internal_format": 0,
+                },
+                flip_y=True,
+            )
+            if not self.rendering_suspended:
+                render_context.report_swap()
+        except Exception as error:
+            diagnostic_log("video_surface.paint.error", error=repr(error))
+
+    def resizeGL(self, _width: int, _height: int) -> None:
+        signature = (
+            int(_width),
+            int(_height),
+            self.width(),
+            self.height(),
+            self.devicePixelRatioF(),
+        )
+        if signature != self._last_resize_signature:
+            self._last_resize_signature = signature
+            diagnostic_log(
+                "video_surface.resize_gl",
+                gl_size=f"{_width}x{_height}",
+                widget=f"{self.width()}x{self.height()}",
+                dpr=f"{self.devicePixelRatioF():.3f}",
+                surface=widget_snapshot(self),
+            )
+        self.update()
+
+    def _context_about_to_be_destroyed(self) -> None:
+        diagnostic_log(
+            "video_surface.context_about_to_be_destroyed",
+            context_id=id(QOpenGLContext.currentContext())
+            if QOpenGLContext.currentContext() is not None
+            else "none",
+            tracked_context_id=id(self.render_qt_context)
+            if self.render_qt_context is not None
+            else "none",
+        )
+        self._free_render_context(make_current=True)
+
+    def _free_render_context(self, make_current: bool) -> None:
+        if self.render_context is None:
+            self.render_qt_context = None
+            self._gl_proc_callback = None
+            return
+        diagnostic_log(
+            "video_surface.render_context.free",
+            render_context_id=id(self.render_context),
+            qt_context_id=id(self.render_qt_context)
+            if self.render_qt_context is not None
+            else "none",
+            make_current=make_current,
+        )
+        made_current = False
+        try:
+            if make_current:
+                self.makeCurrent()
+                made_current = True
+            self.render_context.free()
+        except Exception:
+            pass
+        finally:
+            self.render_context = None
+            self.render_qt_context = None
+            self._gl_proc_callback = None
+            if made_current:
+                try:
+                    self.doneCurrent()
+                except Exception:
+                    pass
+
+    def _ensure_render_context(self) -> None:
+        if (
+            self.rendering_suspended
+            or self.render_context is not None
+            or self.player is None
+            or mpv is None
+        ):
+            return
+        context = QOpenGLContext.currentContext()
+        if context is None:
+            return
+
+        @mpv.MpvGlGetProcAddressFn
+        def get_proc_address(_ctx, name) -> int:
+            active_context = QOpenGLContext.currentContext()
+            if active_context is None:
+                return 0
+            try:
+                address = active_context.getProcAddress(name)
+            except TypeError:
+                address = active_context.getProcAddress(name.decode("ascii"))
+            if not address:
+                return 0
+            try:
+                return int(address)
+            except TypeError:
+                return int(address.__int__())
+
+        try:
+            self._gl_proc_callback = get_proc_address
+            self.render_context = mpv.MpvRenderContext(
+                self.player,
+                "opengl",
+                opengl_init_params={"get_proc_address": get_proc_address},
+            )
+            self.render_qt_context = context
+            self.render_context.update_cb = self.frame_update_requested.emit
+            diagnostic_log(
+                "video_surface.render_context.create",
+                render_context_id=id(self.render_context),
+                qt_context_id=id(context),
+                surface=widget_snapshot(self),
+            )
+        except Exception as error:
+            self.render_context = None
+            self.render_qt_context = None
+            diagnostic_log("video_surface.render_context.create.error", error=repr(error))
+
+
+class MpvPreviewVideoSurface(QOpenGLWidget):
+    frame_update_requested = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.player = None
+        self.render_context = None
+        self.render_qt_context = None
+        self._gl_proc_callback = None
+        self._last_paint_signature = None
+        self._last_paint_log_at = 0.0
+        self._last_resize_signature = None
+        self.setAutoFillBackground(False)
+        self.frame_update_requested.connect(self.update)
+        diagnostic_log("preview_surface.init", surface=widget_snapshot(self))
+
+    def attach_player(self, player) -> None:
+        self.player = player
+        diagnostic_log(
+            "preview_surface.attach_player",
+            player_id=id(player),
+            context_id=id(self.context()) if self.context() is not None else "none",
+            surface=widget_snapshot(self),
+        )
+        if self.context() is not None and self.context().isValid():
+            try:
+                self.makeCurrent()
+                self._ensure_render_context()
+            finally:
+                self.doneCurrent()
+        self.update()
+
+    def detach_player(self) -> None:
+        diagnostic_log("preview_surface.detach_player", surface=widget_snapshot(self))
+        self._free_render_context(make_current=True)
+        self.player = None
+
+    def initializeGL(self) -> None:
+        context = QOpenGLContext.currentContext()
+        diagnostic_log(
+            "preview_surface.initialize_gl",
+            context_id=id(context) if context is not None else "none",
+            valid=bool(context and context.isValid()),
+            surface=widget_snapshot(self),
+        )
+        if context is not None:
+            try:
+                context.aboutToBeDestroyed.connect(self._context_about_to_be_destroyed)
+            except (RuntimeError, TypeError):
+                pass
+        self._ensure_render_context()
+
+    def paintGL(self) -> None:
+        context = QOpenGLContext.currentContext()
+        if self.render_context is not None and context is not self.render_qt_context:
+            diagnostic_log(
+                "preview_surface.context_changed",
+                old_context_id=id(self.render_qt_context)
+                if self.render_qt_context is not None
+                else "none",
+                new_context_id=id(context) if context is not None else "none",
+                surface=widget_snapshot(self),
+            )
+            self._free_render_context(make_current=False)
         self._ensure_render_context()
         if self.render_context is None:
             return
         scale = self.devicePixelRatioF()
         width = max(1, int(self.width() * scale))
         height = max(1, int(self.height() * scale))
+        fbo = int(self.defaultFramebufferObject())
+        signature = (
+            width,
+            height,
+            fbo,
+            id(context) if context is not None else 0,
+            id(self.render_context),
+        )
+        now = time.monotonic()
+        if signature != self._last_paint_signature or now - self._last_paint_log_at > 1.5:
+            self._last_paint_signature = signature
+            self._last_paint_log_at = now
+            diagnostic_log(
+                "preview_surface.paint",
+                target=f"{width}x{height}",
+                widget=f"{self.width()}x{self.height()}",
+                dpr=f"{scale:.3f}",
+                fbo=fbo,
+                context_id=id(context) if context is not None else "none",
+                render_context_id=id(self.render_context),
+            )
         try:
             self.render_context.update()
             self.render_context.render(
                 opengl_fbo={
                     "w": width,
                     "h": height,
-                    "fbo": int(self.defaultFramebufferObject()),
+                    "fbo": fbo,
                     "internal_format": 0,
                 },
                 flip_y=True,
             )
             self.render_context.report_swap()
-        except Exception:
-            pass
+        except Exception as error:
+            diagnostic_log("preview_surface.paint.error", error=repr(error))
 
     def resizeGL(self, _width: int, _height: int) -> None:
+        signature = (
+            int(_width),
+            int(_height),
+            self.width(),
+            self.height(),
+            self.devicePixelRatioF(),
+        )
+        if signature != self._last_resize_signature:
+            self._last_resize_signature = signature
+            diagnostic_log(
+                "preview_surface.resize_gl",
+                gl_size=f"{_width}x{_height}",
+                widget=f"{self.width()}x{self.height()}",
+                dpr=f"{self.devicePixelRatioF():.3f}",
+                surface=widget_snapshot(self),
+            )
         self.update()
+
+    def _context_about_to_be_destroyed(self) -> None:
+        diagnostic_log(
+            "preview_surface.context_about_to_be_destroyed",
+            context_id=id(QOpenGLContext.currentContext())
+            if QOpenGLContext.currentContext() is not None
+            else "none",
+            tracked_context_id=id(self.render_qt_context)
+            if self.render_qt_context is not None
+            else "none",
+        )
+        self._free_render_context(make_current=True)
+
+    def _free_render_context(self, make_current: bool) -> None:
+        if self.render_context is None:
+            self.render_qt_context = None
+            self._gl_proc_callback = None
+            return
+        diagnostic_log(
+            "preview_surface.render_context.free",
+            render_context_id=id(self.render_context),
+            qt_context_id=id(self.render_qt_context)
+            if self.render_qt_context is not None
+            else "none",
+            make_current=make_current,
+        )
+        made_current = False
+        try:
+            if make_current:
+                self.makeCurrent()
+                made_current = True
+            self.render_context.free()
+        except Exception:
+            pass
+        finally:
+            self.render_context = None
+            self.render_qt_context = None
+            self._gl_proc_callback = None
+            if made_current:
+                try:
+                    self.doneCurrent()
+                except Exception:
+                    pass
 
     def _ensure_render_context(self) -> None:
         if self.render_context is not None or self.player is None or mpv is None:
@@ -2134,9 +3767,18 @@ class MpvVideoSurface(QOpenGLWidget):
                 "opengl",
                 opengl_init_params={"get_proc_address": get_proc_address},
             )
+            self.render_qt_context = context
             self.render_context.update_cb = self.frame_update_requested.emit
-        except Exception:
+            diagnostic_log(
+                "preview_surface.render_context.create",
+                render_context_id=id(self.render_context),
+                qt_context_id=id(context),
+                surface=widget_snapshot(self),
+            )
+        except Exception as error:
             self.render_context = None
+            self.render_qt_context = None
+            diagnostic_log("preview_surface.render_context.create.error", error=repr(error))
 
 
 class MpvController(QObject):
@@ -2159,25 +3801,35 @@ class MpvController(QObject):
         self.timer.timeout.connect(self._poll)
         if mpv is not None and MPV_RUNTIME is not None:
             try:
+                options = {
+                    "idle": True,
+                    "vo": "libmpv",
+                    "input_default_bindings": False,
+                    "input_vo_keyboard": False,
+                    "osc": False,
+                    "osd_level": 0,
+                    "config": False,
+                    "terminal": False,
+                    "hwdec": "auto-safe",
+                    "sub_auto": "no",
+                    "sub_ass_override": "no",
+                    "audio_display": "no",
+                    "keep_open": False,
+                }
                 self.player = mpv.MPV(
-                    idle=True,
-                    vo="libmpv",
-                    input_default_bindings=False,
-                    input_vo_keyboard=False,
-                    osc=False,
-                    osd_level=0,
-                    config=False,
-                    terminal=False,
-                    hwdec="auto-safe",
-                    sub_auto="no",
-                    sub_ass_override="no",
-                    audio_display="no",
-                    keep_open=False,
+                    **options,
+                )
+                diagnostic_log(
+                    "mpv.controller.init",
+                    player_id=id(self.player),
+                    options=json.dumps(options, sort_keys=True),
+                    surface_type=type(surface).__name__,
                 )
                 if hasattr(self.surface, "attach_player"):
                     self.surface.attach_player(self.player)
                 self.fit_video()
             except Exception as error:
+                diagnostic_log("mpv.controller.init.error", error=repr(error))
                 self.error.emit(str(error))
 
     @property
@@ -2189,8 +3841,10 @@ class MpvController(QObject):
         path: str,
         start_ms: int = 0,
         volume: int = 80,
+        autoplay: bool = True,
     ) -> bool:
         if not self.available:
+            diagnostic_log("mpv.open.unavailable", path=path)
             self.error.emit("The bundled playback engine could not be loaded.")
             return False
         try:
@@ -2199,10 +3853,20 @@ class MpvController(QObject):
             self._opened_at = time.monotonic()
             self._has_media = True
             self._ended_emitted = False
+            diagnostic_log(
+                "mpv.open",
+                generation=generation,
+                path=path,
+                start_ms=start_ms,
+                volume=volume,
+                autoplay=autoplay,
+                surface=widget_snapshot(self.surface),
+            )
             self.player.volume = max(0, min(100, int(volume)))
             self.player.mute = False
-            self.player.pause = False
+            self.player.pause = not autoplay
             self.player.command("loadfile", str(path), "replace")
+            self.player.pause = not autoplay
             self.fit_video()
             QTimer.singleShot(
                 120,
@@ -2218,7 +3882,37 @@ class MpvController(QObject):
             self.timer.start()
             return True
         except Exception as error:
+            diagnostic_log("mpv.open.error", path=path, error=repr(error))
             self.error.emit(str(error))
+            return False
+
+    def open_preview(self, path: str) -> bool:
+        if not self.available:
+            return False
+        try:
+            self._generation += 1
+            diagnostic_log("mpv.preview.open", path=path, generation=self._generation)
+            self._opened_at = time.monotonic()
+            self._has_media = True
+            self._ended_emitted = False
+            for option, value in (
+                ("loop-file", "inf"),
+                ("sid", "no"),
+                ("aid", "no"),
+            ):
+                try:
+                    self.player.command("set", option, value)
+                except Exception:
+                    pass
+            self.player.volume = 0
+            self.player.mute = True
+            self.player.pause = False
+            self.player.command("loadfile", str(path), "replace")
+            self.fit_video()
+            self.timer.start()
+            return True
+        except Exception as error:
+            diagnostic_log("mpv.preview.open.error", path=path, error=repr(error))
             return False
 
     def _run_if_current(self, generation: int, action) -> None:
@@ -2257,6 +3951,7 @@ class MpvController(QObject):
     def fit_video(self) -> None:
         if not self.player:
             return
+        diagnostic_log("mpv.fit_video")
         for option, value in (
             ("keepaspect", "yes"),
             ("keepaspect-window", "no"),
@@ -2276,9 +3971,14 @@ class MpvController(QObject):
                     pass
 
     def stop(self) -> None:
+        diagnostic_log("mpv.stop", generation=self._generation)
         self._generation += 1
         self.timer.stop()
         if self.player:
+            try:
+                self.player.command("set", "loop-file", "no")
+            except Exception:
+                pass
             try:
                 self.player.stop()
             except Exception:
@@ -2289,6 +3989,7 @@ class MpvController(QObject):
         self._ended_emitted = False
 
     def quiet_for_close(self) -> None:
+        diagnostic_log("mpv.quiet_for_close")
         self._generation += 1
         self.timer.stop()
         if self.player:
@@ -2304,12 +4005,23 @@ class MpvController(QObject):
     def toggle_pause(self) -> None:
         if not self.player:
             return
-        self.player.pause = not bool(self.player.pause)
+        new_value = not bool(self.player.pause)
+        diagnostic_log("mpv.toggle_pause", paused=new_value)
+        self.player.pause = new_value
+
+    def set_paused(self, paused: bool) -> None:
+        if self.player:
+            try:
+                diagnostic_log("mpv.set_paused", paused=paused)
+                self.player.pause = bool(paused)
+            except Exception:
+                pass
 
     def set_time(self, milliseconds: int) -> None:
         if self.player:
             try:
                 seconds = max(0, int(milliseconds)) / 1000.0
+                diagnostic_log("mpv.seek", milliseconds=milliseconds)
                 self.player.command("seek", seconds, "absolute", "exact")
             except Exception:
                 try:
@@ -2340,6 +4052,13 @@ class MpvController(QObject):
         if self.player:
             self.player.volume = max(0, min(100, int(volume)))
 
+    def set_muted(self, muted: bool) -> None:
+        if self.player:
+            try:
+                self.player.mute = bool(muted)
+            except Exception:
+                pass
+
     def set_rate(self, rate: float) -> None:
         if self.player:
             self.player.speed = max(0.25, min(4.0, float(rate)))
@@ -2350,7 +4069,7 @@ class MpvController(QObject):
             safe_description(str(track.get("lang", ""))).upper(),
             safe_description(str(track.get("codec", ""))).upper(),
         ]
-        label = " · ".join(part for part in parts if part and part != "UNKNOWN")
+        label = " Â· ".join(part for part in parts if part and part != "UNKNOWN")
         return label or f"Track {track.get('id', '')}".strip()
 
     def _tracks_of_type(self, track_type: str) -> list[dict]:
@@ -2414,9 +4133,17 @@ class MpvController(QObject):
         playing = self.is_playing()
         if playing != self._last_playing:
             self._last_playing = playing
+            diagnostic_log(
+                "mpv.playing_changed",
+                playing=playing,
+                current_ms=current,
+                length_ms=length,
+                state=self.state(),
+            )
             self.playing_changed.emit(playing)
         try:
             if bool(self.player.eof_reached) and not self._ended_emitted:
+                diagnostic_log("mpv.ended", current_ms=current, length_ms=length)
                 self._ended_emitted = True
                 self._has_media = False
                 self.ended.emit()
@@ -2611,6 +4338,32 @@ class HoverIconButton(QToolButton):
         self.setIconSize(self.hover_icon_size if self._hovered else self.base_icon_size)
 
 
+class StaticIconButton(HoverIconButton):
+    def set_hovered(self, hovered: bool) -> None:
+        self._hovered = False
+        self._size_animation.stop()
+        self.setIconSize(self.base_icon_size)
+
+    def setDown(self, down: bool) -> None:
+        super().setDown(False)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            self.window().activateWindow()
+            self.window().setFocus(Qt.MouseFocusReason)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            if self.rect().contains(event.position().toPoint()):
+                self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 class NativePlayerInputFilter(QAbstractNativeEventFilter):
     WM_LBUTTONDOWN = 0x0201
     WM_LBUTTONUP = 0x0202
@@ -2672,6 +4425,54 @@ class NativePlayerInputFilter(QAbstractNativeEventFilter):
         return True, 0
 
 
+class NativePlayerResizeFilter(QAbstractNativeEventFilter):
+    WM_ENTERSIZEMOVE = 0x0231
+    WM_EXITSIZEMOVE = 0x0232
+    WM_SIZING = 0x0214
+    WM_WINDOWPOSCHANGED = 0x0047
+
+    def __init__(self, window: "DordieWatchWindow") -> None:
+        super().__init__()
+        self.window = window
+
+    def nativeEventFilter(self, event_type, message):
+        if sys.platform != "win32":
+            return False, 0
+        try:
+            native_message = ctypes.wintypes.MSG.from_address(int(message))
+        except (TypeError, ValueError):
+            return False, 0
+
+        if native_message.message not in {
+            self.WM_ENTERSIZEMOVE,
+            self.WM_EXITSIZEMOVE,
+        }:
+            return False, 0
+        if not self._belongs_to_player_window(int(native_message.hWnd)):
+            return False, 0
+
+        player = self.window.player
+        if native_message.message == self.WM_ENTERSIZEMOVE:
+            player.begin_interactive_resize()
+        elif native_message.message == self.WM_EXITSIZEMOVE:
+            player.end_interactive_resize()
+        return False, 0
+
+    def _belongs_to_player_window(self, hwnd: int) -> bool:
+        if self.window.pages.currentWidget() is not self.window.player:
+            return False
+        try:
+            window_hwnd = int(self.window.winId())
+        except RuntimeError:
+            return False
+        if hwnd == window_hwnd:
+            return True
+        try:
+            return bool(ctypes.windll.user32.IsChild(window_hwnd, hwnd))
+        except Exception:
+            return False
+
+
 SKIP_BACK_RING_PATH = (
     "M11.0198 2.04817C13.3222 1.8214 15.6321 2.39998 17.5557 3.68532"
     "C19.4794 4.97067 20.8978 6.88324 21.5694 9.09718"
@@ -2711,7 +4512,7 @@ def build_skip_control_icon(kind: str) -> QIcon:
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
     renderer.render(painter, QRectF(5, 5, 38, 38))
-    font = QFont("Arial")
+    font = app_qfont(13)
     font.setPixelSize(13)
     font.setBold(True)
     painter.setFont(font)
@@ -2868,6 +4669,8 @@ class PlayerPage(QWidget):
         self.controls_visible = True
         self.controls_animating = False
         self.control_animation: Optional[QParallelAnimationGroup] = None
+        self.interactive_resizing = False
+        self.fullscreen_recovery_generation = 0
         self.menu_open = False
         self.track_panel: Optional[QFrame] = None
         self.routed_control_press: Optional[HoverIconButton] = None
@@ -2876,6 +4679,10 @@ class PlayerPage(QWidget):
         self.control_hover_widgets: tuple[QWidget, ...] = ()
         self.last_subtitle_selection: int = -1
         self.last_nonzero_volume = max(1, int(settings.get("volume", 80)))
+        self._last_resize_log_signature = None
+        self._last_layout_log_signature = None
+        self._last_pointer_log_at = 0.0
+        self._last_pointer_log_pos = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -2893,10 +4700,7 @@ class PlayerPage(QWidget):
         self.video_surface.setMouseTracking(True)
         self.video_surface.installEventFilter(self)
         self.controller = MpvController(self.video_surface)
-        self.controller.position_changed.connect(self._position_changed)
-        self.controller.playing_changed.connect(self._playing_changed)
-        self.controller.ended.connect(self._ended)
-        self.controller.error.connect(self._show_error)
+        self._connect_controller_signals(self.controller)
 
         self.top_bar = QFrame(self.overlay)
         self.top_bar.setObjectName("playerTop")
@@ -2904,10 +4708,9 @@ class PlayerPage(QWidget):
         self.top_bar.installEventFilter(self)
         self.top_opacity = QGraphicsOpacityEffect(self.top_bar)
         self.top_opacity.setOpacity(1.0)
-        self.top_bar.setGraphicsEffect(self.top_opacity)
         top_layout = QHBoxLayout(self.top_bar)
         top_layout.setContentsMargins(18, 18, 18, 18)
-        self.back_button = HoverIconButton()
+        self.back_button = StaticIconButton()
         self.back_button.setObjectName("playerIcon")
         set_player_button_icon(self.back_button, "back")
         self.back_button.setToolTip("Back (Esc)")
@@ -2923,7 +4726,6 @@ class PlayerPage(QWidget):
         self.bottom_bar.installEventFilter(self)
         self.bottom_opacity = QGraphicsOpacityEffect(self.bottom_bar)
         self.bottom_opacity.setOpacity(1.0)
-        self.bottom_bar.setGraphicsEffect(self.bottom_opacity)
         bottom_layout = QVBoxLayout(self.bottom_bar)
         bottom_layout.setContentsMargins(20, 4, 20, 8)
         bottom_layout.setSpacing(8)
@@ -2990,6 +4792,17 @@ class PlayerPage(QWidget):
         controls.addWidget(self.title, 0, Qt.AlignCenter)
         controls.addLayout(right_controls, 1)
         bottom_layout.addLayout(controls)
+
+        self.top_control_ghost = QLabel(self.overlay)
+        self.top_control_ghost.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.top_control_ghost_opacity = QGraphicsOpacityEffect(self.top_control_ghost)
+        self.top_control_ghost.setGraphicsEffect(self.top_control_ghost_opacity)
+        self.top_control_ghost.hide()
+        self.bottom_control_ghost = QLabel(self.overlay)
+        self.bottom_control_ghost.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.bottom_control_ghost_opacity = QGraphicsOpacityEffect(self.bottom_control_ghost)
+        self.bottom_control_ghost.setGraphicsEffect(self.bottom_control_ghost_opacity)
+        self.bottom_control_ghost.hide()
 
         self.volume_popup = QFrame(self.overlay)
         self.volume_popup.setObjectName("volumePopup")
@@ -3105,7 +4918,23 @@ class PlayerPage(QWidget):
             widget.installEventFilter(self)
         self.native_input_filter = None
 
-    def play_movie(self, movie: Movie) -> None:
+    def _connect_controller_signals(self, controller: MpvController) -> None:
+        controller.position_changed.connect(self._position_changed)
+        controller.playing_changed.connect(self._playing_changed)
+        controller.ended.connect(self._ended)
+        controller.error.connect(self._show_error)
+
+    def play_movie(
+        self, movie: Movie, start_ms: Optional[int] = None, autoplay: bool = True
+    ) -> None:
+        diagnostic_log(
+            "player.play_movie",
+            title=movie.title,
+            path=movie.path,
+            start_ms=start_ms,
+            autoplay=autoplay,
+            player=widget_snapshot(self),
+        )
         self._close_track_panel()
         self.playback_token += 1
         playback_token = self.playback_token
@@ -3117,15 +4946,28 @@ class PlayerPage(QWidget):
         self.subtitle_preference_applied = False
         self._sync_video_surface_geometry()
         self.timeline.setRange(0, max(0, movie.duration_ms))
-        self.timeline.setValue(movie.progress_ms if not movie.completed else 0)
-        set_player_button_icon(self.play_button, "pause")
-        self.play_button.setToolTip("Pause (K)")
+        start_position = (
+            max(0, int(start_ms))
+            if start_ms is not None
+            else movie.progress_ms if not movie.completed else 0
+        )
+        self.timeline.setValue(start_position)
+        set_player_button_icon(self.play_button, "pause" if autoplay else "play")
+        self.play_button.setToolTip("Pause (K)" if autoplay else "Play (K)")
         self.playback_started_at = time.monotonic()
         self.controller.open(
             movie.path,
-            movie.progress_ms if not movie.completed else 0,
+            start_position,
             int(self.settings.get("volume", 80)),
+            autoplay=autoplay,
         )
+        if not autoplay:
+            QTimer.singleShot(
+                160,
+                lambda token=playback_token: self._run_for_playback(
+                    token, lambda: self.controller.set_paused(True)
+                ),
+            )
         for delay in (120, 300, 700, 1200):
             QTimer.singleShot(
                 delay,
@@ -3194,7 +5036,12 @@ class PlayerPage(QWidget):
             QTimer.singleShot(80, self._finish_close_when_safe)
             return
         window = self.window()
-        if window.isFullScreen():
+        if hasattr(window, "is_player_fullscreen") and window.is_player_fullscreen():
+            window.exit_player_fullscreen()
+            set_player_button_icon(self.fullscreen_button, "fullscreen")
+            self.fullscreen_button.setToolTip("Fullscreen (F)")
+            QApplication.processEvents()
+        elif window.isFullScreen():
             window.showNormal()
             set_player_button_icon(self.fullscreen_button, "fullscreen")
             self.fullscreen_button.setToolTip("Fullscreen (F)")
@@ -3208,23 +5055,129 @@ class PlayerPage(QWidget):
         self.back_requested.emit()
 
     def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        window = self.window()
+        player_fullscreen = (
+            window.is_player_fullscreen()
+            if hasattr(window, "is_player_fullscreen")
+            else window.isFullScreen() if window else False
+        )
+        signature = (
+            self.width(),
+            self.height(),
+            self.isVisible(),
+            player_fullscreen,
+        )
+        if signature != self._last_resize_log_signature:
+            self._last_resize_log_signature = signature
+            diagnostic_log(
+                "player.resize_event",
+                player=widget_snapshot(self),
+                window=widget_snapshot(window) if window else "none",
+                fullscreen=player_fullscreen,
+                native_fullscreen=window.isFullScreen() if window else False,
+            )
+        self._snap_layout_for_resize()
+
+    def _stop_control_animation(self) -> None:
+        if self.controls_animating and self.control_animation is not None:
+            self.control_animation.stop()
+            self.control_animation.deleteLater()
+            self.control_animation = None
+        self.controls_animating = False
+        if hasattr(self, "top_control_ghost"):
+            self.top_control_ghost.hide()
+            self.bottom_control_ghost.hide()
+
+    def _snap_layout_for_resize(self) -> None:
+        self._stop_control_animation()
+        video_suspended = bool(
+            hasattr(self, "video_surface")
+            and self.video_surface.rendering_suspended
+        )
+        if not video_suspended:
+            self._sync_video_surface_geometry()
+        self._sync_overlay_geometry()
+        if not video_suspended:
+            self.video_surface.lower()
+        self._log_layout_snapshot("player.layout.snap")
+
+    def _force_integrated_window_layout(self) -> None:
+        self._stop_control_animation()
         self._sync_video_surface_geometry()
         self._sync_overlay_geometry()
         self.video_surface.lower()
-        super().resizeEvent(event)
+        self.overlay.raise_()
+        self.top_bar.raise_()
+        self.bottom_bar.raise_()
+        self.video_surface.update()
+        self.overlay.update()
+        self._log_layout_snapshot("player.layout.force")
+
+    def recover_after_fullscreen_transition(self) -> None:
+        self.fullscreen_recovery_generation += 1
+        if self.movie is None:
+            return
+        diagnostic_log(
+            "player.fullscreen_recover",
+            generation=self.fullscreen_recovery_generation,
+            player=widget_snapshot(self),
+            window=widget_snapshot(self.window()) if self.window() else "none",
+            fullscreen=self.window().is_player_fullscreen()
+            if hasattr(self.window(), "is_player_fullscreen")
+            else self.window().isFullScreen()
+            if self.window()
+            else False,
+            native_fullscreen=self.window().isFullScreen() if self.window() else False,
+        )
+        self.controls_visible = True
+        self.top_opacity.setOpacity(1.0)
+        self.bottom_opacity.setOpacity(1.0)
+        self._snap_layout_for_resize()
+        self.overlay.show()
+        self.overlay.raise_()
+        self._restore_overlay_input(force=True)
+        self.top_bar.show()
+        self.bottom_bar.show()
+        self.top_bar.move(0, 0)
+        self.bottom_bar.move(0, self.overlay.height() - self.bottom_bar.height())
 
     def begin_interactive_resize(self) -> None:
-        self._sync_video_surface_geometry()
+        self.interactive_resizing = True
+        self.fullscreen_recovery_generation += 1
+        diagnostic_log(
+            "player.interactive_resize.begin",
+            player=widget_snapshot(self),
+            window=widget_snapshot(self.window()) if self.window() else "none",
+        )
+        self.hide_timer.stop()
+        self.volume_popup_timer.stop()
+        self._update_icon_hovers(None)
+        self._snap_layout_for_resize()
 
     def end_interactive_resize(self) -> None:
+        self.interactive_resizing = False
+        diagnostic_log(
+            "player.interactive_resize.end",
+            player=widget_snapshot(self),
+            window=widget_snapshot(self.window()) if self.window() else "none",
+        )
         self._settle_video_layout()
+        if self.controller.is_playing() and self.controls_visible:
+            self.hide_timer.start()
 
     def _settle_video_layout(self) -> None:
-        self._sync_video_surface_geometry()
-        self._sync_overlay_geometry()
-        self.controller.fit_video()
+        self._force_integrated_window_layout()
 
     def _sync_video_surface_geometry(self) -> None:
+        if self.video_surface.rendering_suspended:
+            diagnostic_log(
+                "player.video_surface_geometry.skipped_suspended",
+                player=widget_snapshot(self),
+                surface=widget_snapshot(self.video_surface),
+                target=f"{self.width()}x{self.height()}",
+            )
+            return
         target = self.rect()
         if self.video_surface.geometry() != target:
             self.video_surface.setGeometry(target)
@@ -3239,14 +5192,12 @@ class PlayerPage(QWidget):
         self.top_bar.resize(self.overlay.width(), 96)
         self.bottom_bar.resize(self.overlay.width(), 108)
         if not self.controls_animating:
-            self.top_bar.move(0, 0 if self.controls_visible else -96)
+            top_hidden_offset = 16
+            bottom_hidden_offset = 22
+            self.top_bar.move(0, 0 if self.controls_visible else -top_hidden_offset)
             self.bottom_bar.move(
                 0,
-                (
-                    self.overlay.height() - 108
-                    if self.controls_visible
-                    else self.overlay.height()
-                ),
+                self.overlay.height() - 108 + (0 if self.controls_visible else bottom_hidden_offset),
             )
         self.toast.adjustSize()
         self.toast.move(
@@ -3264,6 +5215,9 @@ class PlayerPage(QWidget):
         )
         self.top_bar.raise_()
         self.bottom_bar.raise_()
+        if hasattr(self, "top_control_ghost"):
+            self.top_control_ghost.raise_()
+            self.bottom_control_ghost.raise_()
         if self.track_panel and self.track_panel.isVisible():
             self._position_track_panel()
             self.track_panel.raise_()
@@ -3275,6 +5229,32 @@ class PlayerPage(QWidget):
         self.feedback.raise_()
         self.icon_feedback.raise_()
         self.toast.raise_()
+
+    def _log_layout_snapshot(self, event: str) -> None:
+        signature = (
+            event,
+            self.width(),
+            self.height(),
+            self.video_surface.geometry().getRect(),
+            self.overlay.geometry().getRect(),
+            self.top_bar.geometry().getRect(),
+            self.bottom_bar.geometry().getRect(),
+            self.controls_visible,
+            self.window().isFullScreen() if self.window() else False,
+        )
+        if signature == self._last_layout_log_signature:
+            return
+        self._last_layout_log_signature = signature
+        diagnostic_log(
+            event,
+            player=widget_snapshot(self),
+            surface=widget_snapshot(self.video_surface),
+            overlay=widget_snapshot(self.overlay),
+            top=widget_snapshot(self.top_bar),
+            bottom=widget_snapshot(self.bottom_bar),
+            controls_visible=self.controls_visible,
+            fullscreen=self.window().isFullScreen() if self.window() else False,
+        )
 
     def _position_volume_popup(self) -> None:
         self.volume_popup.adjustSize()
@@ -3468,10 +5448,14 @@ class PlayerPage(QWidget):
             window = self.window()
             if self.track_panel and self.track_panel.isVisible():
                 self._close_track_panel()
-            elif window.isFullScreen():
-                window.showNormal()
-                set_player_button_icon(self.fullscreen_button, "fullscreen")
-                self.fullscreen_button.setToolTip("Fullscreen (F)")
+            elif (
+                hasattr(window, "is_player_fullscreen")
+                and window.is_player_fullscreen()
+            ):
+                self.hide_timer.stop()
+                self._stop_control_animation()
+                self.overlay.hide()
+                window.exit_player_fullscreen()
             else:
                 self.close_player()
         else:
@@ -3552,7 +5536,7 @@ class PlayerPage(QWidget):
 
     def _show_seek_tooltip(self, value: int, slider_x: int) -> None:
         self.seek_tooltip.setText(format_duration(value))
-        frames = self.movie.preview_frames if self.movie else ()
+        frames = usable_episode_preview_frames(self.movie) if self.movie else ()
         if frames:
             maximum = max(1, self.timeline.maximum())
             frame_index = min(
@@ -3660,15 +5644,14 @@ class PlayerPage(QWidget):
             self._animate_controls(True)
         elif self.controls_animating:
             pass
-        elif self.top_opacity.opacity() < 0.99:
-            self._animate_controls(True)
         else:
             self.top_bar.move(0, 0)
             self.bottom_bar.move(0, self.overlay.height() - self.bottom_bar.height())
-            self.top_opacity.setOpacity(1.0)
-            self.bottom_opacity.setOpacity(1.0)
         self.top_bar.raise_()
         self.bottom_bar.raise_()
+        if hasattr(self, "top_control_ghost"):
+            self.top_control_ghost.raise_()
+            self.bottom_control_ghost.raise_()
         if self.track_panel and self.track_panel.isVisible():
             self.track_panel.raise_()
         if self.volume_popup.isVisible():
@@ -3695,10 +5678,32 @@ class PlayerPage(QWidget):
         )
 
     def _poll_pointer(self) -> None:
-        if self.movie and self.isVisible():
-            self._sync_overlay_geometry()
         position = QCursor.pos()
         self._poll_control_press(position)
+        moved_for_log = position != self._last_pointer_log_pos
+        now = time.monotonic()
+        if (
+            moved_for_log
+            and self.isVisible()
+            and self.movie
+            and (self.window().isFullScreen() if self.window() else False)
+            and now - self._last_pointer_log_at > 0.25
+        ):
+            self._last_pointer_log_at = now
+            self._last_pointer_log_pos = position
+            local = self.mapFromGlobal(position)
+            diagnostic_log(
+                "player.pointer.sample",
+                global_pos=f"{position.x()},{position.y()}",
+                local_pos=f"{local.x()},{local.y()}",
+                in_player=self.rect().contains(local),
+                controls_visible=self.controls_visible,
+                player=widget_snapshot(self),
+            )
+        if self.interactive_resizing:
+            self.last_cursor_position = position
+            self._update_icon_hovers(None)
+            return
         moved = position != self.last_cursor_position
         self.last_cursor_position = position
         self._update_icon_hovers(
@@ -3780,6 +5785,8 @@ class PlayerPage(QWidget):
             button.set_hovered(hovered)
 
     def _hide_controls(self) -> None:
+        if self.interactive_resizing:
+            return
         panel_hovered = bool(
             self.track_panel
             and self.track_panel.isVisible()
@@ -3807,48 +5814,68 @@ class PlayerPage(QWidget):
             self.video_surface.setCursor(Qt.BlankCursor)
             self.overlay.setCursor(Qt.BlankCursor)
 
+    def _snapshot_control_bar(self, widget: QWidget, ghost: QLabel) -> None:
+        pixmap = QPixmap(widget.size())
+        pixmap.fill(Qt.transparent)
+        widget.render(pixmap)
+        ghost.setPixmap(pixmap)
+        ghost.resize(widget.size())
+        ghost.move(widget.pos())
+        ghost.show()
+        ghost.raise_()
+
     def _animate_controls(self, showing: bool) -> None:
         if self.control_animation is not None:
             self.control_animation.stop()
             self.control_animation.deleteLater()
+        self.top_control_ghost.hide()
+        self.bottom_control_ghost.hide()
+
+        top_hidden_offset = 16
+        bottom_hidden_offset = 22
+        top_visible = QPoint(0, 0)
+        top_hidden = QPoint(0, -top_hidden_offset)
+        bottom_visible = QPoint(0, self.overlay.height() - self.bottom_bar.height())
+        bottom_hidden = QPoint(0, bottom_visible.y() + bottom_hidden_offset)
+        self.top_bar.setAttribute(Qt.WA_TransparentForMouseEvents, not showing)
+        self.bottom_bar.setAttribute(Qt.WA_TransparentForMouseEvents, not showing)
+
+        if showing or self.interactive_resizing:
+            self.control_animation = None
+            self.controls_animating = False
+            self.top_bar.show()
+            self.bottom_bar.show()
+            self.top_bar.move(top_visible)
+            self.bottom_bar.move(bottom_visible)
+            return
+
+        self._snapshot_control_bar(self.top_bar, self.top_control_ghost)
+        self._snapshot_control_bar(self.bottom_bar, self.bottom_control_ghost)
+        self.top_control_ghost_opacity.setOpacity(1.0)
+        self.bottom_control_ghost_opacity.setOpacity(1.0)
+        self.top_bar.hide()
+        self.bottom_bar.hide()
 
         group = QParallelAnimationGroup(self)
         self.control_animation = group
         self.controls_animating = True
-        duration = 240 if showing else 280
-        curve = QEasingCurve.OutCubic if showing else QEasingCurve.InCubic
-        positions = (
-            (
-                self.top_bar,
-                self.top_bar.pos(),
-                QPoint(0, 0 if showing else -self.top_bar.height()),
-            ),
-            (
-                self.bottom_bar,
-                self.bottom_bar.pos(),
-                QPoint(
-                    0,
-                    (
-                        self.overlay.height() - self.bottom_bar.height()
-                        if showing
-                        else self.overlay.height()
-                    ),
-                ),
-            ),
-        )
-        for widget, start, end in positions:
+        duration = 130
+        curve = QEasingCurve.OutCubic
+        for widget, end in (
+            (self.top_control_ghost, top_hidden),
+            (self.bottom_control_ghost, bottom_hidden),
+        ):
             animation = QPropertyAnimation(widget, b"pos", group)
             animation.setDuration(duration)
-            animation.setStartValue(start)
+            animation.setStartValue(widget.pos())
             animation.setEndValue(end)
             animation.setEasingCurve(curve)
             group.addAnimation(animation)
-
-        for effect in (self.top_opacity, self.bottom_opacity):
+        for effect in (self.top_control_ghost_opacity, self.bottom_control_ghost_opacity):
             animation = QPropertyAnimation(effect, b"opacity", group)
             animation.setDuration(duration)
-            animation.setStartValue(effect.opacity())
-            animation.setEndValue(1.0 if showing else 0.0)
+            animation.setStartValue(1.0)
+            animation.setEndValue(0.0)
             animation.setEasingCurve(curve)
             group.addAnimation(animation)
 
@@ -3865,16 +5892,42 @@ class PlayerPage(QWidget):
         self.controls_animating = False
         self.control_animation = None
         animation.deleteLater()
+        self.top_control_ghost.hide()
+        self.bottom_control_ghost.hide()
+        if not self.controls_visible:
+            self.top_bar.hide()
+            self.bottom_bar.hide()
+        else:
+            self.top_bar.show()
+            self.bottom_bar.show()
         self._sync_overlay_geometry()
 
     def _toggle_fullscreen(self) -> None:
         window = self.window()
-        entering = not window.isFullScreen()
+        using_borderless = hasattr(window, "is_player_fullscreen")
+        entering = (
+            not window.is_player_fullscreen()
+            if using_borderless
+            else not window.isFullScreen()
+        )
+        diagnostic_log(
+            "player.fullscreen_button",
+            entering=entering,
+            using_borderless=using_borderless,
+            player=widget_snapshot(self),
+            window=widget_snapshot(window),
+            window_fullscreen=window.isFullScreen(),
+        )
         self.click_timer.stop()
         self.ignore_click_release = True
         self._close_track_panel(reveal_controls=False)
+        self.hide_timer.stop()
+        self._stop_control_animation()
         self.overlay.hide()
-        window.showFullScreen() if entering else window.showNormal()
+        if using_borderless:
+            window.enter_player_fullscreen() if entering else window.exit_player_fullscreen()
+        else:
+            window.showFullScreen() if entering else window.showNormal()
         set_player_button_icon(
             self.fullscreen_button,
             "windowed" if entering else "fullscreen",
@@ -3883,14 +5936,6 @@ class PlayerPage(QWidget):
             "Exit fullscreen (F)" if entering else "Fullscreen (F)"
         )
 
-        def restore_overlay() -> None:
-            self._settle_video_layout()
-            self.overlay.show()
-            self.overlay.raise_()
-            self._restore_overlay_input(force=True)
-            self._show_controls(keep=True)
-
-        QTimer.singleShot(0, restore_overlay)
         QTimer.singleShot(
             600, lambda: setattr(self, "ignore_click_release", False)
         )
@@ -4216,8 +6261,14 @@ class PlayerPage(QWidget):
 
 
 class DordieWatchWindow(QMainWindow):
-    WM_ENTERSIZEMOVE = 0x0231
-    WM_EXITSIZEMOVE = 0x0232
+    GWL_STYLE = -16
+    WS_CAPTION = 0x00C00000
+    WS_THICKFRAME = 0x00040000
+    HWND_TOPMOST = -1
+    HWND_NOTOPMOST = -2
+    SWP_NOZORDER = 0x0004
+    SWP_NOACTIVATE = 0x0010
+    SWP_FRAMECHANGED = 0x0020
 
     def __init__(self, launch_manifest_url: Optional[str] = None) -> None:
         super().__init__()
@@ -4247,13 +6298,15 @@ class DordieWatchWindow(QMainWindow):
             )
             if database_cover:
                 movie.cover = database_cover
-                movie.thumbnail = database_cover
             else:
                 movie.cover = ""
+            if not episode_still_for_movie(movie):
                 movie.thumbnail = catalog_placeholder(
                     self.store, Path(movie.path), movie.title
                 )
         self.scan_task: Optional[LibraryScanTask] = None
+        self.preview_task: Optional[PreviewGenerationTask] = None
+        self.preview_task_key = ""
         self.scan_token = 0
         self.scan_progress_map: dict[str, tuple[int, float, bool]] = {}
         self.scan_seen_paths: set[str] = set()
@@ -4264,6 +6317,13 @@ class DordieWatchWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(1500, 900)
         self.setMinimumSize(980, 640)
+        self._was_fullscreen = False
+        self._player_fullscreen = False
+        self._player_fullscreen_restore_geometry: Optional[QRect] = None
+        self._player_fullscreen_restore_state = Qt.WindowNoState
+        self._player_fullscreen_restore_flags = self.windowFlags()
+        self._player_fullscreen_restore_style: Optional[int] = None
+        self._player_fullscreen_transitioning = False
         self.escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
         self.escape_shortcut.activated.connect(self._handle_escape)
 
@@ -4276,12 +6336,22 @@ class DordieWatchWindow(QMainWindow):
         self.pages.addWidget(self.collection_page)
         self.pages.addWidget(self.player)
         self.player_return_page: QWidget = self.home
+        self.series_dialog: Optional[SeriesDetailsDialog] = None
+        self.series_backdrop: Optional[QFrame] = None
+        self.series_backdrop_animation: Optional[QPropertyAnimation] = None
+        self.series_backdrop_hiding = False
+        self.player_launch_overlay: Optional[PlayerLaunchTransitionOverlay] = None
+        self.native_resize_filter: Optional[NativePlayerResizeFilter] = None
+        app = QApplication.instance()
+        if app is not None:
+            self.native_resize_filter = NativePlayerResizeFilter(self)
+            app.installNativeEventFilter(self.native_resize_filter)
+            diagnostic_log("window.native_resize_filter.installed")
         self.close_after_player = False
         self.home.refresh_requested.connect(self.refresh_libraries)
         self.home.movie_activated.connect(self.open_collection)
+        self.home.hero_play_requested.connect(self.play_movie_from_home_hero)
         self.home.search.textChanged.connect(self.rebuild_home)
-        self.collection_page.back_requested.connect(self.show_home)
-        self.collection_page.movie_activated.connect(self.play_movie)
         self.player.back_requested.connect(self.show_previous_page)
         self.player.progress_saved.connect(self.save_progress)
         self.player.settings_changed.connect(self.save_library)
@@ -4296,9 +6366,13 @@ class DordieWatchWindow(QMainWindow):
                     "The playback engine is unavailable. Rebuild the app with mpv included.",
                 ),
             )
-        # A saved catalog is ready to use immediately. Only a brand-new
-        # library needs an initial lightweight file enumeration.
-        if not self.movies:
+        missing_episode_previews = any(
+            not has_episode_preview_frames(movie)
+            for movie in self.movies
+        )
+        # A saved catalog is ready to use immediately unless it predates
+        # per-episode preview frames. In that case, refresh in the background.
+        if not self.movies or missing_episode_previews:
             QTimer.singleShot(0, self.refresh_libraries)
         if launch_manifest_url:
             QTimer.singleShot(
@@ -4306,22 +6380,247 @@ class DordieWatchWindow(QMainWindow):
                 lambda url=launch_manifest_url: self.open_website_media(url),
             )
 
-    def nativeEvent(self, event_type, message):
-        if sys.platform == "win32" and hasattr(self, "player"):
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange and hasattr(self, "player"):
+            is_fullscreen = self.isFullScreen()
             try:
-                native_message = ctypes.wintypes.MSG.from_address(int(message))
-            except (TypeError, ValueError):
-                return super().nativeEvent(event_type, message)
-            if native_message.message == self.WM_ENTERSIZEMOVE:
+                state_value = int(self.windowState())
+            except TypeError:
+                state_value = getattr(self.windowState(), "value", str(self.windowState()))
+            diagnostic_log(
+                "window.state_change",
+                fullscreen=is_fullscreen,
+                state=state_value,
+                window=widget_snapshot(self),
+                current_page=type(self.pages.currentWidget()).__name__,
+            )
+            if self._player_fullscreen_transitioning:
+                return
+            if is_fullscreen != self._was_fullscreen:
+                self._was_fullscreen = is_fullscreen
                 if self.pages.currentWidget() is self.player:
-                    self.player.begin_interactive_resize()
-            elif native_message.message == self.WM_EXITSIZEMOVE:
-                if self.pages.currentWidget() is self.player:
-                    self.player.end_interactive_resize()
-        return super().nativeEvent(event_type, message)
+                    set_player_button_icon(
+                        self.player.fullscreen_button,
+                        "windowed" if is_fullscreen else "fullscreen",
+                    )
+                    self.player.fullscreen_button.setToolTip(
+                        "Exit fullscreen (F)"
+                        if is_fullscreen
+                        else "Fullscreen (F)"
+                    )
+                    if not self.player.video_surface.rendering_suspended:
+                        self.player.recover_after_fullscreen_transition()
+
+    def is_player_fullscreen(self) -> bool:
+        return self._player_fullscreen
+
+    def _window_hwnd(self) -> Optional[int]:
+        if sys.platform != "win32":
+            return None
+        try:
+            return int(self.winId())
+        except RuntimeError:
+            return None
+
+    def _get_native_window_style(self) -> Optional[int]:
+        hwnd = self._window_hwnd()
+        if hwnd is None:
+            return None
+        try:
+            return int(ctypes.windll.user32.GetWindowLongPtrW(hwnd, self.GWL_STYLE))
+        except Exception as error:
+            diagnostic_log("window.native_style.get.error", error=repr(error))
+            return None
+
+    def _set_native_window_style(self, style: int) -> bool:
+        hwnd = self._window_hwnd()
+        if hwnd is None:
+            return False
+        try:
+            ctypes.windll.user32.SetWindowLongPtrW(hwnd, self.GWL_STYLE, int(style))
+            return True
+        except Exception as error:
+            diagnostic_log("window.native_style.set.error", error=repr(error))
+            return False
+
+    def _apply_native_window_frame_change(
+        self,
+        geometry: QRect,
+        *,
+        topmost: Optional[bool] = None,
+    ) -> bool:
+        hwnd = self._window_hwnd()
+        if hwnd is None:
+            return False
+        z_order = 0
+        flags = self.SWP_NOACTIVATE | self.SWP_FRAMECHANGED
+        if topmost is True:
+            z_order = self.HWND_TOPMOST
+        elif topmost is False:
+            z_order = self.HWND_NOTOPMOST
+        else:
+            flags |= self.SWP_NOZORDER
+        try:
+            ctypes.windll.user32.SetWindowPos(
+                hwnd,
+                z_order,
+                int(geometry.x()),
+                int(geometry.y()),
+                int(geometry.width()),
+                int(geometry.height()),
+                flags,
+            )
+            diagnostic_log(
+                "window.native_frame_change",
+                geometry=geometry.getRect(),
+                topmost=topmost,
+            )
+            return True
+        except Exception as error:
+            diagnostic_log("window.native_frame_change.error", error=repr(error))
+            return False
+
+    def enter_player_fullscreen(self) -> None:
+        if self._player_fullscreen or self.player.movie is None:
+            return
+        diagnostic_log(
+            "window.fullscreen.enter.before",
+            window=widget_snapshot(self),
+            player=widget_snapshot(self.player),
+            surface=widget_snapshot(self.player.video_surface),
+        )
+        screen = self.windowHandle().screen() if self.windowHandle() else None
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        target_geometry = screen.geometry() if screen is not None else self.geometry()
+        # Do not use the exact monitor rectangle. On Windows/Qt this can promote
+        # the borderless window into native fullscreen, which changes the
+        # QOpenGLWidget/libmpv resize path after exiting fullscreen. Make it
+        # one pixel taller and keep it topmost so it still covers the taskbar
+        # without entering Qt's native fullscreen state.
+        target_geometry = QRect(
+            target_geometry.x(),
+            target_geometry.y(),
+            target_geometry.width(),
+            target_geometry.height() + 1,
+        )
+        self._player_fullscreen_restore_geometry = self.geometry()
+        self._player_fullscreen_restore_state = self.windowState()
+        self._player_fullscreen_restore_flags = self.windowFlags()
+        self._player_fullscreen_restore_style = self._get_native_window_style()
+        self._player_fullscreen = True
+        self._player_fullscreen_transitioning = True
+        self.player.hide_timer.stop()
+        self.player._stop_control_animation()
+        self.player.volume_popup.hide()
+        self.player._close_track_panel(reveal_controls=False)
+        if self._player_fullscreen_restore_style is not None:
+            borderless_style = self._player_fullscreen_restore_style & ~(
+                self.WS_CAPTION | self.WS_THICKFRAME
+            )
+            self._set_native_window_style(borderless_style)
+            self._apply_native_window_frame_change(target_geometry, topmost=True)
+            self.setGeometry(target_geometry)
+        else:
+            self.setGeometry(target_geometry)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        diagnostic_log(
+            "window.fullscreen.enter.after_show",
+            window=widget_snapshot(self),
+            player=widget_snapshot(self.player),
+            surface=widget_snapshot(self.player.video_surface),
+            target=target_geometry.getRect(),
+            native_fullscreen=self.isFullScreen(),
+            native_style=self._get_native_window_style(),
+        )
+        set_player_button_icon(self.player.fullscreen_button, "windowed")
+        self.player.fullscreen_button.setToolTip("Exit fullscreen (F)")
+        QTimer.singleShot(40, self._finish_fullscreen_transition)
+
+    def exit_player_fullscreen(self) -> None:
+        if not self._player_fullscreen:
+            return
+        diagnostic_log(
+            "window.fullscreen.exit.before",
+            window=widget_snapshot(self),
+            player=widget_snapshot(self.player),
+            surface=widget_snapshot(self.player.video_surface),
+        )
+        self.player.hide_timer.stop()
+        self.player._stop_control_animation()
+        self.player.volume_popup.hide()
+        self.player._close_track_panel(reveal_controls=False)
+        restore_geometry = self._player_fullscreen_restore_geometry
+        restore_state = self._player_fullscreen_restore_state
+        restore_flags = self._player_fullscreen_restore_flags
+        restore_style = self._player_fullscreen_restore_style
+        self._player_fullscreen = False
+        self._player_fullscreen_transitioning = True
+        if restore_style is not None and restore_geometry is not None:
+            self._set_native_window_style(restore_style)
+            self._apply_native_window_frame_change(restore_geometry, topmost=False)
+            self.setGeometry(restore_geometry)
+            self.show()
+        else:
+            self.setWindowFlags(restore_flags)
+            self.setWindowState(restore_state & ~Qt.WindowFullScreen)
+            if restore_geometry is not None:
+                self.setGeometry(restore_geometry)
+            if restore_state & Qt.WindowMaximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+        diagnostic_log(
+            "window.fullscreen.exit.after_show_normal",
+            window=widget_snapshot(self),
+            player=widget_snapshot(self.player),
+            surface=widget_snapshot(self.player.video_surface),
+            native_fullscreen=self.isFullScreen(),
+            native_style=self._get_native_window_style(),
+        )
+        self.raise_()
+        self.activateWindow()
+        set_player_button_icon(self.player.fullscreen_button, "fullscreen")
+        self.player.fullscreen_button.setToolTip("Fullscreen (F)")
+        QTimer.singleShot(40, self._finish_fullscreen_transition)
+
+    def _finish_fullscreen_transition(self) -> None:
+        diagnostic_log(
+            "window.fullscreen.transition.finish",
+            window=widget_snapshot(self),
+            player=widget_snapshot(self.player),
+            surface=widget_snapshot(self.player.video_surface),
+            fullscreen=self.is_player_fullscreen(),
+            native_fullscreen=self.isFullScreen(),
+        )
+        if self.player.video_surface.rendering_suspended:
+            self.player.video_surface.set_rendering_suspended(
+                False, "fullscreen_transition_finished"
+            )
+        self.player.recover_after_fullscreen_transition()
+        self._player_fullscreen_transitioning = False
 
     def rebuild_home(self, *_args) -> None:
         self.home.rebuild(self.roots, self.movies, self.home.search.text())
+
+    def refresh_open_series_dialog(self) -> None:
+        dialog = self.series_dialog
+        if dialog is None or dialog._closing_animation_started:
+            return
+        current_key = dialog.collection.folder
+        updated = next(
+            (
+                collection
+                for collection in build_collections(self.movies, self.roots)
+                if collection.folder == current_key
+            ),
+            None,
+        )
+        if updated is not None:
+            dialog.set_collection(updated)
 
     def scan_folder(self, folder: Path) -> None:
         if not folder.is_dir():
@@ -4336,7 +6635,7 @@ class DordieWatchWindow(QMainWindow):
             for movie in self.movies
         }
         self.scan_seen_paths = set()
-        self.home.set_scanning(f"Scanning {Path(root).name}…")
+        self.home.set_scanning(f"Scanning {Path(root).name}â€¦")
         task = LibraryScanTask(Path(root), self.store, self.movies)
         self.scan_task = task
         task.signals.movie.connect(
@@ -4374,7 +6673,7 @@ class DordieWatchWindow(QMainWindow):
     ) -> None:
         if token != self.scan_token:
             return
-        title = textwrap.shorten(name, width=44, placeholder="…")
+        title = textwrap.shorten(name, width=44, placeholder="â€¦")
         self.home.set_scanning(f"{current} / {total}  {title}", current, total)
 
     def _scan_finished(self, root: str, token: int) -> None:
@@ -4390,6 +6689,7 @@ class DordieWatchWindow(QMainWindow):
         self.home.set_scanning(None)
         self.save_library()
         self.rebuild_home()
+        self.refresh_open_series_dialog()
         if self.pending_website_payload:
             payload = self.pending_website_payload
             self.pending_website_payload = None
@@ -4437,7 +6737,7 @@ class DordieWatchWindow(QMainWindow):
         ):
             return
 
-        self.home.set_scanning("Syncing with DordieList…")
+        self.home.set_scanning("Syncing with DordieListâ€¦")
         task = WebsiteLibraryTask(library_url, media_ids, self.store)
         self.website_library_task = task
         task.signals.loaded.connect(self._website_library_loaded)
@@ -4451,6 +6751,7 @@ class DordieWatchWindow(QMainWindow):
         update_movies_from_website(self.movies, payloads, self.store)
         self.save_library()
         self.rebuild_home()
+        self.refresh_open_series_dialog()
 
     def _website_library_failed(self, message: str) -> None:
         self.website_library_task = None
@@ -4468,7 +6769,7 @@ class DordieWatchWindow(QMainWindow):
         if not self.scan_task:
             self.scan_folder(self.video_folder)
         if not self.scan_task:
-            self.home.set_scanning("Connecting to DordieList…")
+            self.home.set_scanning("Connecting to DordieListâ€¦")
         task = WebsiteMediaTask(manifest_url, self.store)
         self.website_task = task
         task.signals.loaded.connect(self._website_media_loaded)
@@ -4594,16 +6895,150 @@ class DordieWatchWindow(QMainWindow):
             return None
         return by_label.get(selected)
 
-    def open_collection(self, collection: LibraryCollection) -> None:
-        if len(collection.movies) == 1:
-            self.play_movie(collection.movies[0])
+    def open_collection(
+        self,
+        collection: LibraryCollection,
+        source_geometry: Optional[QRect] = None,
+    ) -> None:
+        if self.series_dialog is not None:
+            self.series_dialog.request_close()
+        self._show_series_backdrop()
+        origin_geometry = None
+        if isinstance(source_geometry, QRect):
+            origin_geometry = QRect(
+                self.mapFromGlobal(source_geometry.topLeft()),
+                source_geometry.size(),
+            )
+        dialog = SeriesDetailsDialog(collection, self, origin_geometry)
+        self.series_dialog = dialog
+        dialog.movie_activated.connect(self.play_movie)
+        dialog.finished.connect(
+            lambda *_args, active=dialog: self._clear_series_dialog(active)
+        )
+        dialog.show_centered()
+        dialog.raise_()
+        self.start_series_preview_generation(collection)
+
+    def start_series_preview_generation(self, collection: LibraryCollection) -> None:
+        if not collection.movies:
             return
-        self.collection_page.set_collection(collection)
-        self.pages.setCurrentWidget(self.collection_page)
+        if not any(not has_episode_preview_frames(movie) for movie in collection.movies):
+            return
+        if self.preview_task is not None:
+            self.preview_task.cancel()
+        task = PreviewGenerationTask(collection.movies, self.store, collection.folder)
+        self.preview_task = task
+        self.preview_task_key = collection.folder
+        task.signals.movie.connect(
+            lambda payload, key=collection.folder: self._preview_movie_ready(
+                payload, key
+            )
+        )
+        task.signals.finished.connect(self._preview_generation_finished)
+        task.signals.failed.connect(self._preview_generation_failed)
+        QThreadPool.globalInstance().start(task.runnable)
+
+    def _preview_movie_ready(self, payload: dict, key: str) -> None:
+        movie = Movie.from_dict(payload)
+        self.movies = [item for item in self.movies if item.path != movie.path]
+        self.movies.append(movie)
+        dialog = self.series_dialog
+        if (
+            dialog is not None
+            and not dialog._closing_animation_started
+            and dialog.collection.folder == key
+        ):
+            self.refresh_open_series_dialog()
+
+    def _preview_generation_finished(self, key: str) -> None:
+        if self.preview_task_key == key:
+            self.preview_task = None
+            self.preview_task_key = ""
+        self.save_library()
+        self.refresh_open_series_dialog()
+
+    def _preview_generation_failed(self, message: str) -> None:
+        diagnostic_log("preview_task.signal_failed", message=message)
+        self.preview_task = None
+        self.preview_task_key = ""
+
+    def _clear_series_dialog(self, dialog: SeriesDetailsDialog) -> None:
+        if self.series_dialog is dialog:
+            self.series_dialog = None
+            if (
+                self.series_backdrop is not None
+                and self.series_backdrop.isVisible()
+                and not self.series_backdrop_hiding
+            ):
+                self._hide_series_backdrop()
+
+    def _show_series_backdrop(self) -> None:
+        self.series_backdrop_hiding = False
+        if self.series_backdrop is None:
+            self.series_backdrop = QFrame(self)
+            self.series_backdrop.setObjectName("seriesBackdrop")
+            self.series_backdrop.setGeometry(self.rect())
+            self.series_backdrop.mousePressEvent = self._series_backdrop_mouse_press
+        self.series_backdrop.setGeometry(self.rect())
+        self.series_backdrop.show()
+        self.series_backdrop.raise_()
+        effect = self.series_backdrop.graphicsEffect()
+        if not isinstance(effect, QGraphicsOpacityEffect):
+            effect = QGraphicsOpacityEffect(self.series_backdrop)
+            self.series_backdrop.setGraphicsEffect(effect)
+            effect.setOpacity(0.0)
+        self.series_backdrop_animation = QPropertyAnimation(effect, b"opacity", self)
+        self.series_backdrop_animation.setDuration(430)
+        self.series_backdrop_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.series_backdrop_animation.setStartValue(effect.opacity())
+        self.series_backdrop_animation.setEndValue(1.0)
+        self.series_backdrop_animation.start()
+
+    def _series_backdrop_mouse_press(self, event) -> None:
+        dialog = self.series_dialog
+        if dialog is None or dialog._closing_animation_started:
+            event.accept()
+            return
+        dialog.request_close()
+        event.accept()
+
+    def _hide_series_backdrop(self) -> None:
+        if self.series_backdrop is None:
+            return
+        if self.series_backdrop_hiding:
+            return
+        self.series_backdrop_hiding = True
+        effect = self.series_backdrop.graphicsEffect()
+        if not isinstance(effect, QGraphicsOpacityEffect):
+            self.series_backdrop.hide()
+            self.series_backdrop_hiding = False
+            return
+        animation = QPropertyAnimation(effect, b"opacity", self)
+        self.series_backdrop_animation = animation
+        animation.setDuration(380)
+        animation.setEasingCurve(QEasingCurve.InCubic)
+        animation.setStartValue(effect.opacity())
+        animation.setEndValue(0.0)
+        animation.finished.connect(self._finish_series_backdrop_hide)
+        animation.start()
+
+    def _finish_series_backdrop_hide(self) -> None:
+        if self.series_backdrop_animation is not None:
+            self.series_backdrop_animation.stop()
+            self.series_backdrop_animation = None
+        if self.series_backdrop is not None:
+            effect = self.series_backdrop.graphicsEffect()
+            if isinstance(effect, QGraphicsOpacityEffect):
+                effect.setOpacity(0.0)
+            self.series_backdrop.hide()
+        self.series_backdrop_hiding = False
 
     def play_movie(self, movie: Movie) -> None:
         if not Path(movie.path).is_file():
             QMessageBox.warning(self, APP_NAME, "This video is no longer available.")
+            return
+        if self.series_dialog is not None:
+            self._play_movie_from_series_dialog(movie, self.series_dialog)
             return
         current_page = self.pages.currentWidget()
         self.player_return_page = (
@@ -4614,9 +7049,84 @@ class DordieWatchWindow(QMainWindow):
         self.pages.setCurrentWidget(self.player)
         self.player.play_movie(movie)
 
+    def play_movie_from_home_hero(self, movie: Movie) -> None:
+        if not Path(movie.path).is_file():
+            QMessageBox.warning(self, APP_NAME, "This video is no longer available.")
+            return
+        snapshot = self.grab()
+        overlay = PlayerLaunchTransitionOverlay(snapshot, self)
+        self.player_launch_overlay = overlay
+        overlay.finished.connect(self._finish_player_launch_transition)
+        overlay.black_reached.connect(
+            lambda selected=Movie.from_dict(movie.to_dict()), active=overlay: (
+                self._start_player_after_launch_transition(selected, active)
+            )
+        )
+        overlay.start()
+        self.home.hero.stop_preview()
+
+    def _play_movie_from_series_dialog(
+        self, movie: Movie, dialog: SeriesDetailsDialog
+    ) -> None:
+        snapshot = self.grab()
+        overlay = PlayerLaunchTransitionOverlay(snapshot, self)
+        self.player_launch_overlay = overlay
+        overlay.finished.connect(self._finish_player_launch_transition)
+        overlay.black_reached.connect(
+            lambda selected=Movie.from_dict(movie.to_dict()), active=overlay: (
+                self._start_player_after_launch_transition(selected, active)
+            )
+        )
+        overlay.start()
+
+        if self.preview_task:
+            self.preview_task.cancel()
+            self.preview_task = None
+            self.preview_task_key = ""
+        try:
+            dialog.hero.preview_controller.quiet_for_close()
+        except Exception:
+            pass
+        try:
+            dialog.hero.stop_preview()
+        except Exception:
+            pass
+        dialog.hide()
+        dialog._finished_emitted = True
+        dialog.deleteLater()
+        if self.series_dialog is dialog:
+            self.series_dialog = None
+        if self.series_backdrop_animation is not None:
+            self.series_backdrop_animation.stop()
+            self.series_backdrop_animation = None
+        if self.series_backdrop is not None:
+            effect = self.series_backdrop.graphicsEffect()
+            if isinstance(effect, QGraphicsOpacityEffect):
+                effect.setOpacity(0.0)
+            self.series_backdrop.hide()
+        self.series_backdrop_hiding = False
+
+        self.player_return_page = self.home
+
+    def _start_player_after_launch_transition(
+        self, movie: Movie, overlay: PlayerLaunchTransitionOverlay
+    ) -> None:
+        current_page = self.pages.currentWidget()
+        self.player_return_page = (
+            current_page
+            if current_page in {self.home, self.collection_page}
+            else self.home
+        )
+        self.pages.setCurrentWidget(self.player)
+        self.player.play_movie(movie)
+        QTimer.singleShot(180, overlay.finish)
+
+    def _finish_player_launch_transition(self) -> None:
+        self.player_launch_overlay = None
+
     def show_previous_page(self) -> None:
-        if self.isFullScreen():
-            self.showNormal()
+        if self.is_player_fullscreen():
+            self.exit_player_fullscreen()
         self.pages.setCurrentWidget(self.player_return_page)
         if self.player_return_page is self.home:
             self.rebuild_home()
@@ -4625,19 +7135,19 @@ class DordieWatchWindow(QMainWindow):
             QTimer.singleShot(0, self.close)
 
     def show_home(self) -> None:
-        if self.isFullScreen():
-            self.showNormal()
+        if self.is_player_fullscreen():
+            self.exit_player_fullscreen()
         self.pages.setCurrentWidget(self.home)
         self.rebuild_home()
 
     def _handle_escape(self) -> None:
         if self.player.track_panel and self.player.track_panel.isVisible():
             self.player._close_track_panel()
-        elif self.isFullScreen():
-            self.showNormal()
-            set_player_button_icon(self.player.fullscreen_button, "fullscreen")
-            self.player.fullscreen_button.setToolTip("Fullscreen (F)")
-            self.player._show_controls(keep=True)
+        elif self.is_player_fullscreen():
+            self.player.hide_timer.stop()
+            self.player._stop_control_animation()
+            self.player.overlay.hide()
+            self.exit_player_fullscreen()
         elif self.pages.currentWidget() is self.player:
             self.player.close_player()
 
@@ -4650,21 +7160,45 @@ class DordieWatchWindow(QMainWindow):
     def save_library(self) -> None:
         self.store.save(self.roots, self.movies, self.settings)
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        diagnostic_log(
+            "window.resize_event",
+            window=widget_snapshot(self),
+            fullscreen=self.isFullScreen(),
+            current_page=type(self.pages.currentWidget()).__name__
+            if hasattr(self, "pages")
+            else "none",
+            player=widget_snapshot(self.player) if hasattr(self, "player") else "none",
+        )
+        if self.series_backdrop is not None:
+            self.series_backdrop.setGeometry(self.rect())
+        if self.series_dialog is not None:
+            self.series_dialog.recenter()
+            self.series_dialog.raise_()
+
     def closeEvent(self, event) -> None:
         if self.scan_task:
             self.scan_task.cancel()
+        if self.preview_task:
+            self.preview_task.cancel()
         if self.pages.currentWidget() is self.player and self.player.movie:
             self.close_after_player = True
             event.ignore()
             self.player.close_player()
             return
+        if self.native_resize_filter is not None:
+            app = QApplication.instance()
+            if app is not None:
+                app.removeNativeEventFilter(self.native_resize_filter)
+            self.native_resize_filter = None
         self.save_library()
         super().closeEvent(event)
 
 
 STYLESHEET = """
 * {
-    font-family: "Segoe UI";
+    font-family: "Netflix Sans";
     color: #f2f2f2;
     font-size: 12px;
 }
@@ -4674,8 +7208,8 @@ QMainWindow, QStackedWidget, #homeContent, #homeScroll,
     background: #050505;
 }
 #homeHeader {
-    background: #101010;
-    border-bottom: 1px solid #1d1d1d;
+    background: transparent;
+    border-bottom: 1px solid transparent;
 }
 #collectionHeader {
     background: #101010;
@@ -4705,6 +7239,94 @@ QMainWindow, QStackedWidget, #homeContent, #homeScroll,
 #collectionDetails {
     color: #b5b5b5;
     font-size: 15px;
+}
+#seriesDialog {
+    background: transparent;
+    border: none;
+}
+#seriesPanel {
+    background: #181818;
+    border: none;
+    border-radius: 14px;
+}
+#seriesBackdrop {
+    background: rgba(0, 0, 0, 178);
+    border: none;
+}
+#seriesScroll, #seriesScroll > QWidget > QWidget, #seriesContent {
+    background: transparent;
+}
+#seriesHeroOverlay {
+    background: transparent;
+}
+#seriesClose {
+    background: transparent;
+    border: none;
+}
+#seriesTitle {
+    color: #ffffff;
+    font-size: 52px;
+    font-weight: 900;
+}
+#seriesMeta {
+    color: #d4d4d4;
+    font-size: 14px;
+    font-weight: 600;
+}
+#seriesPlay {
+    background: #ffffff;
+    color: #111111;
+    border: none;
+    border-radius: 4px;
+    padding: 9px 18px;
+    font-size: 15px;
+    font-weight: 800;
+}
+#seriesPlay:hover {
+    background: #dcdcdc;
+}
+#seriesEpisodesHeading {
+    color: #ffffff;
+    font-size: 24px;
+    font-weight: 800;
+}
+#seriesEpisodesName {
+    color: #ffffff;
+    font-size: 16px;
+    font-weight: 700;
+}
+#seriesEpisodeRangeButton {
+    background: #242424;
+    border: 1px solid #585858;
+    border-radius: 3px;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 0;
+}
+#seriesEpisodeRangeButton:hover, #seriesEpisodeRangeButton:pressed {
+    background: #242424;
+    border: 1px solid #6a6a6a;
+}
+
+QMenu#seriesEpisodeRangeMenu {
+    background: #1f1f1f;
+    border: 1px solid #4b4b4b;
+    padding: 14px 0;
+}
+QMenu#seriesEpisodeRangeMenu::item {
+    color: #f2f2f2;
+    font-size: 15px;
+    font-weight: 800;
+    padding: 11px 34px 11px 16px;
+}
+QMenu#seriesEpisodeRangeMenu::item:selected {
+    background: #333333;
+}
+
+#seriesEpisodeDivider {
+    background: #383838;
+    border: none;
 }
 #brandLogo {
     color: #e50914;
@@ -5065,6 +7687,7 @@ def build_icon() -> QIcon:
 
 
 def main() -> int:
+    install_debug_logging()
     install_crash_logging()
     if "--register-protocol" in sys.argv:
         return 0 if register_url_scheme() else 1
@@ -5072,9 +7695,24 @@ def main() -> int:
     register_url_scheme()
     QApplication.setApplicationName(APP_NAME)
     QApplication.setOrganizationName("DordieWatch")
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
+    primary_screen = app.primaryScreen()
+    diagnostic_log(
+        "app.qt.start",
+        qt_platform=app.platformName(),
+        primary_screen=primary_screen.name() if primary_screen else "none",
+        screen_geometry=primary_screen.geometry().getRect()
+        if primary_screen
+        else "none",
+        device_pixel_ratio=primary_screen.devicePixelRatio()
+        if primary_screen
+        else "none",
+        share_gl_contexts=QApplication.testAttribute(Qt.AA_ShareOpenGLContexts),
+    )
     app.setStyle("Fusion")
-    app.setStyleSheet(STYLESHEET)
+    loaded_font_family = load_app_font(app)
+    app.setStyleSheet(STYLESHEET.replace("Netflix Sans", loaded_font_family))
     app.setWindowIcon(build_icon())
     manifest_url = website_launch_manifest(sys.argv[1:])
     window = DordieWatchWindow(manifest_url)

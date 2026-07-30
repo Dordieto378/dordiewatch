@@ -47,6 +47,11 @@ if (Test-Path -LiteralPath $libMpv) {
     $arguments += @("--add-binary", "$libMpv;mpv")
 }
 
+$fontPath = Join-Path $PSScriptRoot "font"
+if (Test-Path -LiteralPath $fontPath) {
+    $arguments += @("--add-data", "$fontPath;font")
+}
+
 python -m PyInstaller @arguments
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE

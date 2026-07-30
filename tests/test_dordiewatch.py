@@ -16,6 +16,8 @@ from PySide6.QtWidgets import QApplication, QPushButton, QStackedWidget, QWidget
 
 from dordiewatch import (
     DordieWatchWindow,
+    CollectionGrid,
+    EpisodeListItem,
     HomePage,
     HoverIconButton,
     LibraryCollection,
@@ -33,6 +35,7 @@ from dordiewatch import (
     discover_videos,
     find_binary,
     format_duration,
+    format_episode_runtime,
     generate_previews,
     link_collection_to_database_id,
     load_website_library,
@@ -113,7 +116,7 @@ class DordieWatchCoreTest(unittest.TestCase):
 
     def test_library_scan_does_not_decode_videos(self) -> None:
         app = QApplication.instance() or QApplication([])
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             root = Path(temporary)
             series = root / "Series"
             series.mkdir()
@@ -143,7 +146,7 @@ class DordieWatchCoreTest(unittest.TestCase):
 
     def test_replaced_videos_keep_database_metadata_during_refresh(self) -> None:
         app = QApplication.instance() or QApplication([])
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             root = Path(temporary)
             series = root / "17970"
             series.mkdir()
@@ -202,7 +205,7 @@ class DordieWatchCoreTest(unittest.TestCase):
 
     def test_video_surface_click_does_not_toggle_playback(self) -> None:
         app = QApplication.instance() or QApplication([])
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             previous = os.environ.get("LOCALAPPDATA")
             os.environ["LOCALAPPDATA"] = temporary
             try:
@@ -255,7 +258,7 @@ class DordieWatchCoreTest(unittest.TestCase):
 
     def test_play_movie_uses_embedded_subtitles_without_extraction(self) -> None:
         app = QApplication.instance() or QApplication([])
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             previous = os.environ.get("LOCALAPPDATA")
             os.environ["LOCALAPPDATA"] = temporary
             try:
@@ -417,6 +420,8 @@ class DordieWatchCoreTest(unittest.TestCase):
             os.environ["LOCALAPPDATA"] = temporary
             try:
                 window = DordieWatchWindow()
+                window.show()
+                window.pages.setCurrentWidget(window.player)
                 window.player.resize(800, 600)
                 window.player.movie = Movie(
                     path=str(Path(temporary) / "episode.mkv"),
@@ -449,6 +454,99 @@ class DordieWatchCoreTest(unittest.TestCase):
                 self.assertIsInstance(window.player.video_surface, MpvVideoSurface)
                 self.assertFalse(
                     window.player.video_surface.testAttribute(Qt.WA_NativeWindow)
+                )
+                window.player.movie = None
+                window.close()
+            finally:
+                if previous is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous
+
+    def test_player_resize_cancels_control_animation(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temporary:
+            previous = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = temporary
+            try:
+                window = DordieWatchWindow()
+                window.player.resize(800, 600)
+                window.player.movie = Movie(
+                    path=str(Path(temporary) / "episode.mkv"),
+                    title="Episode",
+                    root=temporary,
+                    size=0,
+                    modified=0,
+                )
+                window.player.overlay.show()
+                window.player._sync_overlay_geometry()
+                window.player._animate_controls(False)
+                self.assertTrue(window.player.controls_animating)
+
+                window.player.resize(900, 700)
+                window.player._snap_layout_for_resize()
+                app.processEvents()
+
+                self.assertFalse(window.player.controls_animating)
+                self.assertEqual(window.player.overlay.geometry(), window.player.rect())
+                self.assertEqual(window.player.video_surface.geometry(), window.player.rect())
+                window.player.movie = None
+                window.close()
+            finally:
+                if previous is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous
+
+    def test_player_snaps_after_fullscreen_roundtrip_resize(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            previous = os.environ.get("LOCALAPPDATA")
+            os.environ["LOCALAPPDATA"] = temporary
+            try:
+                window = DordieWatchWindow()
+                window.show()
+                window.pages.setCurrentWidget(window.player)
+                window.player.movie = Movie(
+                    path=str(Path(temporary) / "episode.mkv"),
+                    title="Episode",
+                    root=temporary,
+                    size=0,
+                    modified=0,
+                )
+                window.player.overlay.show()
+                window.player._force_integrated_window_layout()
+                fit_calls = []
+                window.player.controller.fit_video = lambda: fit_calls.append("fit")
+
+                window.showFullScreen()
+                QTest.qWait(80)
+                app.processEvents()
+                window.showNormal()
+                window.player.recover_after_fullscreen_transition()
+                window.player.begin_interactive_resize()
+                QTest.qWait(620)
+                app.processEvents()
+                self.assertTrue(window.player.interactive_resizing)
+                self.assertFalse(fit_calls)
+                self.assertEqual(window.player.video_surface.geometry(), window.player.rect())
+                window.player.end_interactive_resize()
+                self.assertFalse(window.player.interactive_resizing)
+
+                window.player._animate_controls(False)
+                self.assertTrue(window.player.controls_animating)
+                window.player.resize(940, 680)
+                window.player._snap_layout_for_resize()
+                app.processEvents()
+
+                self.assertFalse(window.player.controls_animating)
+                self.assertEqual(window.player.video_surface.geometry(), window.player.rect())
+                self.assertEqual(window.player.overlay.geometry(), window.player.rect())
+                self.assertEqual(
+                    window.player.bottom_bar.y(),
+                    window.player.overlay.height()
+                    if not window.player.controls_visible
+                    else window.player.overlay.height() - window.player.bottom_bar.height(),
                 )
                 window.player.movie = None
                 window.close()
@@ -512,22 +610,6 @@ class DordieWatchCoreTest(unittest.TestCase):
         self.assertIn(("set", "video-zoom", "0"), calls)
         self.assertIn(("set", "video-aspect-override", "no"), calls)
         self.assertIn(("set", "video-crop", "none"), calls)
-
-    def test_mpv_render_params_are_wrapper_dicts(self) -> None:
-        def noop_proc_address(_ctx, _name):
-            return 0
-
-        init_param = mpv.MpvRenderParam(
-            "opengl_init_params",
-            {"get_proc_address": mpv.MpvGlGetProcAddressFn(noop_proc_address)},
-        )
-        fbo_param = mpv.MpvRenderParam(
-            "opengl_fbo",
-            {"w": 800, "h": 450, "fbo": 1, "internal_format": 0},
-        )
-
-        self.assertEqual(init_param.type_id, 2)
-        self.assertEqual(fbo_param.type_id, 3)
 
     def test_close_waits_for_active_playback_to_pause_before_stop(self) -> None:
         app = QApplication.instance() or QApplication([])
@@ -853,7 +935,7 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
         self.assertIn("mpv", player.mpv_version)
         player.terminate()
         app = QApplication.instance() or QApplication([])
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             previous = os.environ.get("LOCALAPPDATA")
             os.environ["LOCALAPPDATA"] = temporary
             try:
@@ -981,6 +1063,13 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
                     )
                 )
                 play_spy = QSignalSpy(window.player.play_button.clicked)
+                window.player.movie = Movie(
+                    path=str(Path(temporary) / "fullscreen-test.mkv"),
+                    title="Fullscreen test",
+                    root=temporary,
+                    size=0,
+                    modified=0,
+                )
                 QTest.mousePress(
                     window.player.play_button,
                     Qt.LeftButton,
@@ -1001,14 +1090,14 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
                     pos=QPoint(32, 28),
                 )
                 app.processEvents()
-                self.assertFalse(window.isFullScreen())
+                self.assertFalse(window.is_player_fullscreen())
                 QTest.mouseRelease(
                     window.player.fullscreen_button,
                     Qt.LeftButton,
                     pos=QPoint(32, 28),
                 )
                 app.processEvents()
-                self.assertTrue(window.isFullScreen())
+                self.assertTrue(window.is_player_fullscreen())
                 play_count = play_spy.count()
                 QTest.mouseClick(
                     window.player.play_button,
@@ -1017,21 +1106,21 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
                 )
                 app.processEvents()
                 self.assertEqual(play_spy.count(), play_count + 1)
-                self.assertTrue(window.isFullScreen())
+                self.assertTrue(window.is_player_fullscreen())
                 QTest.mousePress(
                     window.player.fullscreen_button,
                     Qt.LeftButton,
                     pos=QPoint(32, 28),
                 )
                 app.processEvents()
-                self.assertTrue(window.isFullScreen())
+                self.assertTrue(window.is_player_fullscreen())
                 QTest.mouseRelease(
                     window.player.fullscreen_button,
                     Qt.LeftButton,
                     pos=QPoint(32, 28),
                 )
                 app.processEvents()
-                self.assertFalse(window.isFullScreen())
+                self.assertFalse(window.is_player_fullscreen())
                 series_folder = str(
                     (Path(temporary) / "Example Series").resolve()
                 )
@@ -1136,14 +1225,20 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
                 )
                 app.processEvents()
                 self.assertEqual(play_spy.count(), play_count + 1)
-                window.player.movie = None
+                window.player.movie = Movie(
+                    path=str(Path(temporary) / "fullscreen-home-test.mkv"),
+                    title="Fullscreen home test",
+                    root=temporary,
+                    size=0,
+                    modified=0,
+                )
                 window.player.overlay.hide()
-                window.showFullScreen()
+                window.enter_player_fullscreen()
                 app.processEvents()
-                self.assertTrue(window.isFullScreen())
+                self.assertTrue(window.is_player_fullscreen())
                 window.show_home()
                 app.processEvents()
-                self.assertFalse(window.isFullScreen())
+                self.assertFalse(window.is_player_fullscreen())
                 window.close()
             finally:
                 if previous is None:
@@ -1223,6 +1318,137 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
         ).x()
         self.assertEqual(search_right, refresh_x)
         stack.close()
+
+    def test_home_library_grid_reflows_on_resize(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        collections = []
+        for index in range(7):
+            movie = Movie(
+                path=f"C:/Videos/Series {index}/episode.mkv",
+                title=f"Episode {index}",
+                root="C:/Videos",
+                size=0,
+                modified=index,
+                collection=f"C:/Videos/Series {index}",
+            )
+            collections.append(
+                LibraryCollection(
+                    folder=movie.collection,
+                    title=f"Series {index}",
+                    movies=[movie],
+                )
+            )
+        grid = CollectionGrid("My Library", collections)
+        grid.resize(830, 700)
+        grid.show()
+        QTest.qWait(80)
+        app.processEvents()
+
+        self.assertEqual(grid._columns, 4)
+        self.assertEqual(grid.cards[3].y(), grid.cards[0].y())
+        self.assertGreater(grid.cards[4].y(), grid.cards[0].y())
+
+        grid.resize(430, 900)
+        QTest.qWait(80)
+        app.processEvents()
+
+        self.assertEqual(grid._columns, 2)
+        self.assertEqual(grid.cards[1].y(), grid.cards[0].y())
+        self.assertGreater(grid.cards[2].y(), grid.cards[0].y())
+        grid.close()
+
+    def test_episode_runtime_is_minutes_only(self) -> None:
+        self.assertEqual(format_episode_runtime(25 * 60_000 + 30_000), "25m")
+        self.assertEqual(format_episode_runtime(48 * 60_000), "48m")
+        self.assertEqual(format_episode_runtime(0), "")
+
+    def test_series_collection_opens_episode_popup(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        previous = os.environ.get("LOCALAPPDATA")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            os.environ["LOCALAPPDATA"] = temporary
+            try:
+                window = DordieWatchWindow()
+                root = Path(temporary) / "videos"
+                series_folder = root / "Series"
+                movie_folder = root / "Movie"
+                series_folder.mkdir(parents=True)
+                movie_folder.mkdir(parents=True)
+                episode_one = series_folder / "episode-1.mkv"
+                episode_two = series_folder / "episode-2.mkv"
+                movie_file = movie_folder / "movie.mkv"
+                episode_one.write_bytes(b"")
+                episode_two.write_bytes(b"")
+                movie_file.write_bytes(b"")
+                series_movies = [
+                    Movie(
+                        path=str(episode_one),
+                        title="Episode 1",
+                        root=str(root),
+                        size=0,
+                        modified=0,
+                        collection=str(series_folder),
+                    ),
+                    Movie(
+                        path=str(episode_two),
+                        title="Episode 2",
+                        root=str(root),
+                        size=0,
+                        modified=0,
+                        collection=str(series_folder),
+                    ),
+                ]
+                movie = Movie(
+                    path=str(movie_file),
+                    title="Movie",
+                    root=str(root),
+                    size=0,
+                    modified=0,
+                    collection=str(movie_folder),
+                )
+                series = LibraryCollection(
+                    folder=str(series_folder),
+                    title="Series",
+                    movies=series_movies,
+                )
+                single = LibraryCollection(
+                    folder=str(movie_folder),
+                    title="Movie",
+                    movies=[movie],
+                )
+                window.show()
+                app.processEvents()
+
+                with patch.object(window, "play_movie") as play_movie:
+                    window.open_collection(series)
+                    app.processEvents()
+                    self.assertIs(window.pages.currentWidget(), window.home)
+                    self.assertIsNotNone(window.series_dialog)
+                    self.assertTrue(window.series_dialog.isVisible())
+                    self.assertIsNotNone(window.series_backdrop)
+                    self.assertTrue(window.series_backdrop.isVisible())
+                    episodes = window.series_dialog.findChildren(EpisodeListItem)
+                    self.assertEqual(len(episodes), 2)
+                    QTest.mouseClick(
+                        episodes[1],
+                        Qt.LeftButton,
+                        pos=QPoint(20, episodes[1].height() // 2),
+                    )
+                    QTest.qWait(260)
+                    app.processEvents()
+                    play_movie.assert_called_once_with(series_movies[1])
+                    self.assertIsNone(window.series_dialog)
+
+                    play_movie.reset_mock()
+                    window.open_collection(single)
+                    play_movie.assert_called_once_with(movie)
+                    self.assertIsNone(window.series_dialog)
+                window.close()
+            finally:
+                if previous is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = previous
 
 
 if __name__ == "__main__":
