@@ -494,6 +494,18 @@ def draw_cover(painter: QPainter, target: QRect, pixmap: QPixmap) -> None:
     painter.drawPixmap(target, scaled, source)
 
 
+def draw_frame_fit(painter: QPainter, target: QRect, pixmap: QPixmap) -> None:
+    painter.fillRect(target, QColor("#111111"))
+    if pixmap.isNull():
+        return
+    scaled = pixmap.scaled(
+        target.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+    )
+    x = target.x() + (target.width() - scaled.width()) // 2
+    y = target.y() + (target.height() - scaled.height()) // 2
+    painter.drawPixmap(QPoint(x, y), scaled)
+
+
 @dataclass
 class Movie:
     path: str
@@ -4364,6 +4376,84 @@ class StaticIconButton(HoverIconButton):
         super().mouseReleaseEvent(event)
 
 
+class PlayerEpisodeMenuItem(QWidget):
+    activated = Signal(object)
+
+    def __init__(self, index: int, movie: Movie, active: bool) -> None:
+        super().__init__()
+        self.index = index
+        self.movie = movie
+        self.active = active
+        self.thumbnail = QPixmap(episode_still_for_movie(movie) or movie.thumbnail)
+        self.setCursor(Qt.ArrowCursor if active else Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.setFixedHeight(220 if active else 86)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and not self.active:
+            self.activated.emit(self.movie)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        active_rect = rect.adjusted(1, 1, -2, -2)
+        if self.active:
+            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.setBrush(QColor(24, 24, 24, 230))
+            painter.drawRect(active_rect)
+        painter.setPen(QColor("#f2f2f2"))
+        painter.setFont(app_qfont(12, QFont.Bold))
+        painter.drawText(QRect(24, 21, 34, 30), Qt.AlignCenter, str(self.index))
+        title = f"Episode {self.index}"
+        title_rect = QRect(76, 22, max(160, self.width() - 276), 28)
+        painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, title)
+
+        progress_width = 132
+        progress_x = max(350, self.width() - progress_width - 126)
+        progress_y = 32
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#8a8a8a"))
+        painter.drawRect(QRect(progress_x, progress_y, progress_width, 2))
+        if self.movie.duration_ms and self.movie.progress_ms:
+            ratio = max(0.0, min(1.0, self.movie.progress_ms / self.movie.duration_ms))
+            painter.setBrush(QColor("#e50914"))
+            painter.drawRect(QRect(progress_x, progress_y, int(progress_width * ratio), 2))
+
+        if not self.active:
+            return
+
+        thumb_rect = QRect(76, 74, 220, 124)
+        clip = QPainterPath()
+        clip.addRoundedRect(thumb_rect, 1, 1)
+        painter.save()
+        painter.setClipPath(clip)
+        draw_frame_fit(painter, thumb_rect, self.thumbnail)
+        painter.fillRect(thumb_rect, QColor(0, 0, 0, 90))
+        painter.restore()
+
+        painter.setPen(QColor("#ffffff"))
+        painter.setFont(app_qfont(12, QFont.Bold))
+        bars_x = thumb_rect.x() + 34
+        bars_y = thumb_rect.y() + 49
+        for offset, height in ((0, 16), (5, 24), (10, 18), (15, 28), (20, 13)):
+            painter.drawLine(
+                bars_x + offset,
+                bars_y + (28 - height) // 2,
+                bars_x + offset,
+                bars_y + (28 + height) // 2,
+            )
+        painter.drawText(
+            QRect(thumb_rect.x() + 70, thumb_rect.y() + 44, 130, 34),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            "Now Playing",
+        )
+
+
 class NativePlayerInputFilter(QAbstractNativeEventFilter):
     WM_LBUTTONDOWN = 0x0201
     WM_LBUTTONUP = 0x0202
@@ -4557,6 +4647,24 @@ def build_player_control_icon(kind: str) -> QIcon:
         painter.setBrush(QColor("#ffffff"))
         painter.drawRoundedRect(9, 7, 5, 18, 1, 1)
         painter.drawRoundedRect(18, 7, 5, 18, 1, 1)
+    elif kind == "next":
+        path = QPainterPath()
+        path.moveTo(8, 7)
+        path.lineTo(22, 16)
+        path.lineTo(8, 25)
+        path.closeSubpath()
+        painter.setPen(QPen(QColor("#ffffff"), 2.1, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+        painter.drawLine(25, 7, 25, 25)
+    elif kind == "episodes":
+        painter.setPen(QPen(QColor("#ffffff"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(QRect(6, 14, 18, 11), 1.5, 1.5)
+        painter.drawLine(11, 25, 9, 28)
+        painter.drawLine(9, 28, 16, 25)
+        painter.drawRoundedRect(QRect(10, 9, 18, 11), 1.5, 1.5)
+        painter.drawRoundedRect(QRect(14, 4, 18, 11), 1.5, 1.5)
     elif kind in {"volume", "muted"}:
         path = QPainterPath()
         path.moveTo(5, 13)
@@ -4658,6 +4766,13 @@ class PlayerPage(QWidget):
         self.store = store
         self.settings = settings
         self.movie: Optional[Movie] = None
+        self.playlist: list[Movie] = []
+        self.playlist_title = ""
+        self.playlist_index = -1
+        self.episode_menu_page_size = 12
+        self.episode_menu_page_start = 0
+        self.playback_blackout_token = 0
+        self.fullscreen_fade_animation: Optional[QPropertyAnimation] = None
         self.selected_subtitle: int = -1
         self.subtitle_preference_applied = False
         self.playback_token = 0
@@ -4694,6 +4809,18 @@ class PlayerPage(QWidget):
         self.overlay.setFocusPolicy(Qt.StrongFocus)
         self.overlay.installEventFilter(self)
         self.overlay.hide()
+        self.playback_blackout = QFrame(self.overlay)
+        self.playback_blackout.setObjectName("playerBlackout")
+        self.playback_blackout.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.playback_blackout.hide()
+
+        self.fullscreen_fade = QFrame(self)
+        self.fullscreen_fade.setObjectName("playerBlackout")
+        self.fullscreen_fade.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.fullscreen_fade_opacity = QGraphicsOpacityEffect(self.fullscreen_fade)
+        self.fullscreen_fade.setGraphicsEffect(self.fullscreen_fade_opacity)
+        self.fullscreen_fade_opacity.setOpacity(0.0)
+        self.fullscreen_fade.hide()
 
         self.video_surface = MpvVideoSurface(self)
         self.video_surface.setObjectName("videoSurface")
@@ -4773,6 +4900,14 @@ class PlayerPage(QWidget):
         self.volume.setRange(0, 100)
         self.volume.setFixedSize(22, 168)
         self.volume.setValue(int(settings.get("volume", 80)))
+        self.next_episode_button = HoverIconButton()
+        self.next_episode_button.setObjectName("playerIcon")
+        set_player_button_icon(self.next_episode_button, "next")
+        self.next_episode_button.setToolTip("Next episode")
+        self.episode_menu_button = HoverIconButton()
+        self.episode_menu_button.setObjectName("playerIcon")
+        set_player_button_icon(self.episode_menu_button, "episodes")
+        self.episode_menu_button.setToolTip("Episodes")
         self.settings_button = HoverIconButton()
         self.settings_button.setObjectName("playerIcon")
         set_player_button_icon(self.settings_button, "captions")
@@ -4786,6 +4921,8 @@ class PlayerPage(QWidget):
         left_controls.addWidget(self.forward_button)
         left_controls.addWidget(self.volume_button)
         left_controls.addStretch()
+        right_controls.addWidget(self.next_episode_button)
+        right_controls.addWidget(self.episode_menu_button)
         right_controls.addWidget(self.settings_button)
         right_controls.addWidget(self.fullscreen_button)
         controls.addLayout(left_controls, 1)
@@ -4872,6 +5009,8 @@ class PlayerPage(QWidget):
             self.rewind_button,
             self.forward_button,
             self.volume_button,
+            self.next_episode_button,
+            self.episode_menu_button,
             self.settings_button,
             self.fullscreen_button,
         )
@@ -4894,9 +5033,12 @@ class PlayerPage(QWidget):
         self.forward_button.clicked.connect(lambda: self._seek_by(10_000))
         self.volume_button.clicked.connect(self._toggle_mute)
         self.volume.valueChanged.connect(self._volume_changed)
+        self.next_episode_button.clicked.connect(self.play_next_episode)
+        self.episode_menu_button.clicked.connect(self.open_episode_menu)
         self.settings_button.clicked.connect(self.open_settings_menu)
         self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
         self._update_volume_icon(self.volume.value())
+        self._update_episode_controls()
         self.control_hover_widgets = (
             self.top_bar,
             self.bottom_bar,
@@ -4910,6 +5052,8 @@ class PlayerPage(QWidget):
             self.volume_popup,
             self.volume,
             self.time_label,
+            self.next_episode_button,
+            self.episode_menu_button,
             self.settings_button,
             self.fullscreen_button,
         )
@@ -4923,6 +5067,229 @@ class PlayerPage(QWidget):
         controller.playing_changed.connect(self._playing_changed)
         controller.ended.connect(self._ended)
         controller.error.connect(self._show_error)
+
+    def set_playlist(self, movies: list[Movie], current_movie: Movie, title: str = "") -> None:
+        self.playlist = list(movies)
+        self.playlist_title = title
+        self.playlist_index = next(
+            (index for index, movie in enumerate(self.playlist) if movie.path == current_movie.path),
+            -1,
+        )
+        if self.playlist_index >= 0:
+            self.episode_menu_page_start = (
+                self.playlist_index // self.episode_menu_page_size
+            ) * self.episode_menu_page_size
+        else:
+            self.episode_menu_page_start = 0
+        self._update_episode_controls()
+
+    def _update_episode_controls(self) -> None:
+        has_series = len(self.playlist) > 1 and self.playlist_index >= 0
+        has_next = has_series and self.playlist_index < len(self.playlist) - 1
+        if hasattr(self, "episode_menu_button"):
+            self.episode_menu_button.setVisible(has_series)
+            self.episode_menu_button.setEnabled(has_series)
+        if hasattr(self, "next_episode_button"):
+            self.next_episode_button.setVisible(has_series)
+            self.next_episode_button.setEnabled(has_next)
+
+    def _show_playback_blackout(self) -> None:
+        self.playback_blackout_token += 1
+        token = self.playback_blackout_token
+        self.playback_blackout.setGeometry(self.overlay.rect())
+        self.playback_blackout.show()
+        self.playback_blackout.raise_()
+        self._stop_control_animation()
+        self.top_bar.hide()
+        self.bottom_bar.hide()
+        self.volume_popup.hide()
+        self.seek_preview.hide()
+        QTimer.singleShot(3500, lambda token=token: self._hide_playback_blackout(token))
+
+    def _hide_playback_blackout(self, token: Optional[int] = None) -> None:
+        if token is not None and token != self.playback_blackout_token:
+            return
+        if self.playback_blackout.isVisible():
+            self.playback_blackout.hide()
+            self._show_controls()
+
+    def _save_current_playback_progress(self) -> None:
+        if not self.movie:
+            return
+        current = self.controller.time()
+        length = self.controller.length() or self.movie.duration_ms
+        completed = bool(length and current >= length * 0.92)
+        self.progress_saved.emit(self.movie, current, completed)
+
+    def play_next_episode(self) -> None:
+        if self.playlist_index < 0 or self.playlist_index >= len(self.playlist) - 1:
+            return
+        self._save_current_playback_progress()
+        next_movie = self.playlist[self.playlist_index + 1]
+        self.playlist_index += 1
+        self._show_playback_blackout()
+        self._close_track_panel(reveal_controls=False)
+        self.play_movie(next_movie, start_ms=0, autoplay=True)
+
+    def _player_episode_range_label(self, start: int, end: int) -> str:
+        if start == end:
+            return f"Episode {start}"
+        if end == start + 1:
+            return f"Episode {start} and {end}"
+        return f"Episodes {start} - {end}"
+
+    def _player_episode_ranges(self) -> list[tuple[int, int]]:
+        total = len(self.playlist)
+        page_size = self.episode_menu_page_size
+        return [(start, min(start + page_size, total)) for start in range(0, total, page_size)]
+
+    def _switch_player_episode_page(self, start: int) -> None:
+        self.episode_menu_page_start = start
+        self.open_episode_menu(rebuild=True)
+
+    def open_episode_range_menu(self) -> None:
+        if len(self.playlist) <= self.episode_menu_page_size or self.playlist_index < 0:
+            return
+        if self.track_panel and self.track_panel.isVisible():
+            self._close_track_panel(reveal_controls=False)
+
+        self._restore_overlay_input(force=True)
+        panel = QFrame(self.overlay)
+        panel.setObjectName("episodePanel")
+        panel.setMouseTracking(True)
+        panel.setFocusPolicy(Qt.NoFocus)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        title = QLabel(self.playlist_title or "Episodes")
+        title.setObjectName("episodeRangePanelTitle")
+        title.setContentsMargins(22, 16, 22, 14)
+        layout.addWidget(title)
+
+        ranges_widget = QWidget()
+        ranges_widget.setObjectName("episodeRangeContents")
+        ranges_layout = QVBoxLayout(ranges_widget)
+        ranges_layout.setContentsMargins(0, 0, 0, 0)
+        ranges_layout.setSpacing(0)
+        current_start = (
+            self.playlist_index // self.episode_menu_page_size
+        ) * self.episode_menu_page_size
+        for start, end in self._player_episode_ranges():
+            active = start == current_start
+            label = self._player_episode_range_label(start + 1, end)
+            button = QPushButton(("   " + label) if active else label)
+            button.setObjectName("episodeRangeOption")
+            button.setProperty("active", active)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFocusPolicy(Qt.NoFocus)
+            if active:
+                button.setIcon(build_player_control_icon("check"))
+                button.setIconSize(QSize(22, 22))
+                button.setContentsMargins(0, 0, 0, 0)
+            else:
+                button.setContentsMargins(44, 0, 0, 0)
+            button.clicked.connect(
+                lambda _checked=False, page_start=start: self._switch_player_episode_page(page_start)
+            )
+            ranges_layout.addWidget(button)
+        ranges_layout.addStretch()
+        layout.addWidget(ranges_widget, 1)
+
+        self.track_panel = panel
+        self.menu_open = True
+        panel.show()
+        self._position_track_panel()
+        panel.raise_()
+        self._show_controls(keep=True)
+        self.hide_timer.start()
+
+    def open_episode_menu(self, rebuild: bool = False) -> None:
+        if len(self.playlist) <= 1 or self.playlist_index < 0:
+            return
+        if self.track_panel and self.track_panel.isVisible():
+            if not rebuild:
+                self._close_track_panel()
+                return
+            self._close_track_panel(reveal_controls=False)
+
+        if not rebuild:
+            self.episode_menu_page_start = (
+                self.playlist_index // self.episode_menu_page_size
+            ) * self.episode_menu_page_size
+
+        self._close_track_panel()
+        self._restore_overlay_input(force=True)
+        panel = QFrame(self.overlay)
+        panel.setObjectName("episodePanel")
+        panel.setMouseTracking(True)
+        panel.setFocusPolicy(Qt.NoFocus)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("episodePanelScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        contents = QWidget()
+        contents.setObjectName("episodePanelContents")
+        rows = QVBoxLayout(contents)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(0)
+
+        header_widget = QWidget()
+        header_widget.setObjectName("episodePanelHeader")
+        header = QHBoxLayout(header_widget)
+        header.setContentsMargins(24, 18, 18, 18)
+        header.setSpacing(10)
+        back = StaticIconButton()
+        back.setObjectName("episodePanelBack")
+        set_player_button_icon(back, "back")
+        back.setFixedSize(26, 34)
+        back.setIconSize(QSize(20, 20))
+        back.setCursor(Qt.PointingHandCursor)
+        back.setFocusPolicy(Qt.NoFocus)
+        back.setVisible(len(self.playlist) > self.episode_menu_page_size)
+        if len(self.playlist) > self.episode_menu_page_size:
+            back.clicked.connect(self.open_episode_range_menu)
+        title = QLabel(self._player_episode_range_label(self.episode_menu_page_start + 1, min(self.episode_menu_page_start + self.episode_menu_page_size, len(self.playlist))))
+        title.setObjectName("episodePanelTitle")
+        header.addWidget(back)
+        header.addWidget(title, 1)
+        rows.addWidget(header_widget)
+        if self.episode_menu_page_start >= len(self.playlist):
+            self.episode_menu_page_start = 0
+        page_start = max(0, self.episode_menu_page_start)
+        page_end = min(page_start + self.episode_menu_page_size, len(self.playlist))
+        for index, movie in enumerate(self.playlist[page_start:page_end], start=page_start + 1):
+            item = PlayerEpisodeMenuItem(index, movie, index - 1 == self.playlist_index)
+            item.activated.connect(self._play_episode_from_menu)
+            rows.addWidget(item)
+        scroll.setWidget(contents)
+        layout.addWidget(scroll, 1)
+
+        self.track_panel = panel
+        self.menu_open = True
+        panel.show()
+        self._position_track_panel()
+        panel.raise_()
+        self._show_controls(keep=True)
+        self.hide_timer.start()
+
+    def _play_episode_from_menu(self, movie: Movie) -> None:
+        new_index = next(
+            (index for index, playlist_movie in enumerate(self.playlist) if playlist_movie.path == movie.path),
+            -1,
+        )
+        if new_index < 0:
+            return
+        self._save_current_playback_progress()
+        self.playlist_index = new_index
+        self._show_playback_blackout()
+        self._close_track_panel(reveal_controls=False)
+        self.play_movie(movie, start_ms=0, autoplay=True)
 
     def play_movie(
         self, movie: Movie, start_ms: Optional[int] = None, autoplay: bool = True
@@ -4941,6 +5308,12 @@ class PlayerPage(QWidget):
         self.close_pending = False
         self.back_button.setEnabled(True)
         self.movie = movie
+        if self.playlist:
+            self.playlist_index = next(
+                (index for index, playlist_movie in enumerate(self.playlist) if playlist_movie.path == movie.path),
+                self.playlist_index,
+            )
+        self._update_episode_controls()
         self.title.setText(movie.title)
         self.selected_subtitle = -1
         self.subtitle_preference_applied = False
@@ -4978,6 +5351,8 @@ class PlayerPage(QWidget):
         self._sync_overlay_geometry()
         self.overlay.show()
         self.overlay.raise_()
+        if self.playback_blackout.isVisible():
+            self.playback_blackout.raise_()
         self._restore_overlay_input(force=True)
         self._queue_overlay_input_restore()
         self._show_controls()
@@ -5136,6 +5511,8 @@ class PlayerPage(QWidget):
         self._snap_layout_for_resize()
         self.overlay.show()
         self.overlay.raise_()
+        if self.playback_blackout.isVisible():
+            self.playback_blackout.raise_()
         self._restore_overlay_input(force=True)
         self.top_bar.show()
         self.bottom_bar.show()
@@ -5189,6 +5566,10 @@ class PlayerPage(QWidget):
         target = QRect(0, 0, self.width(), self.height())
         if self.overlay.geometry() != target:
             self.overlay.setGeometry(target)
+        if hasattr(self, "playback_blackout"):
+            self.playback_blackout.setGeometry(self.overlay.rect())
+        if hasattr(self, "fullscreen_fade"):
+            self.fullscreen_fade.setGeometry(target)
         self.top_bar.resize(self.overlay.width(), 96)
         self.bottom_bar.resize(self.overlay.width(), 108)
         if not self.controls_animating:
@@ -5229,6 +5610,10 @@ class PlayerPage(QWidget):
         self.feedback.raise_()
         self.icon_feedback.raise_()
         self.toast.raise_()
+        if hasattr(self, "playback_blackout") and self.playback_blackout.isVisible():
+            self.playback_blackout.raise_()
+        if hasattr(self, "fullscreen_fade") and self.fullscreen_fade.isVisible():
+            self.fullscreen_fade.raise_()
 
     def _log_layout_snapshot(self, event: str) -> None:
         signature = (
@@ -5473,6 +5858,8 @@ class PlayerPage(QWidget):
         if not self.seeking:
             self.timeline.setValue(current)
             self.time_label.setText(format_duration(length))
+        if self.playback_blackout.isVisible() and current > 100:
+            self._hide_playback_blackout()
         if self.movie and time.monotonic() - self.last_progress_save > 5:
             self.last_progress_save = time.monotonic()
             self.progress_saved.emit(self.movie, current, False)
@@ -5665,6 +6052,10 @@ class PlayerPage(QWidget):
             self.icon_feedback.raise_()
         if self.toast.isVisible():
             self.toast.raise_()
+        if hasattr(self, "playback_blackout") and self.playback_blackout.isVisible():
+            self.playback_blackout.raise_()
+        if hasattr(self, "fullscreen_fade") and self.fullscreen_fade.isVisible():
+            self.fullscreen_fade.raise_()
         self.setCursor(Qt.ArrowCursor)
         self.video_surface.setCursor(Qt.ArrowCursor)
         self.overlay.setCursor(Qt.ArrowCursor)
@@ -5902,32 +6293,62 @@ class PlayerPage(QWidget):
             self.bottom_bar.show()
         self._sync_overlay_geometry()
 
+    def _animate_fullscreen_fade(
+        self,
+        start: float,
+        end: float,
+        duration: int,
+        on_finished=None,
+    ) -> None:
+        if self.fullscreen_fade_animation is not None:
+            self.fullscreen_fade_animation.stop()
+            self.fullscreen_fade_animation.deleteLater()
+            self.fullscreen_fade_animation = None
+        self.fullscreen_fade.setGeometry(self.rect())
+        self.fullscreen_fade.show()
+        self.fullscreen_fade.raise_()
+        self.fullscreen_fade_opacity.setOpacity(start)
+        animation = QPropertyAnimation(self.fullscreen_fade_opacity, b"opacity", self)
+        animation.setDuration(duration)
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.setEasingCurve(QEasingCurve.InOutCubic)
+        self.fullscreen_fade_animation = animation
+
+        def finish() -> None:
+            if end <= 0.0:
+                self.fullscreen_fade.hide()
+            if self.fullscreen_fade_animation is animation:
+                self.fullscreen_fade_animation = None
+            animation.deleteLater()
+            if on_finished is not None:
+                on_finished()
+
+        animation.finished.connect(finish)
+        animation.start()
+
+    def _fade_fullscreen_blackout_out(self) -> None:
+        self._animate_fullscreen_fade(
+            float(self.fullscreen_fade_opacity.opacity()),
+            0.0,
+            260,
+        )
+
     def _toggle_fullscreen(self) -> None:
         window = self.window()
-        using_borderless = hasattr(window, "is_player_fullscreen")
-        entering = (
-            not window.is_player_fullscreen()
-            if using_borderless
-            else not window.isFullScreen()
-        )
-        diagnostic_log(
-            "player.fullscreen_button",
-            entering=entering,
-            using_borderless=using_borderless,
-            player=widget_snapshot(self),
-            window=widget_snapshot(window),
-            window_fullscreen=window.isFullScreen(),
-        )
+        if hasattr(window, "toggle_player_fullscreen_with_fade"):
+            window.toggle_player_fullscreen_with_fade()
+            return
+        if window is None:
+            return
+        entering = not window.isFullScreen()
         self.click_timer.stop()
         self.ignore_click_release = True
         self._close_track_panel(reveal_controls=False)
         self.hide_timer.stop()
         self._stop_control_animation()
         self.overlay.hide()
-        if using_borderless:
-            window.enter_player_fullscreen() if entering else window.exit_player_fullscreen()
-        else:
-            window.showFullScreen() if entering else window.showNormal()
+        window.showFullScreen() if entering else window.showNormal()
         set_player_button_icon(
             self.fullscreen_button,
             "windowed" if entering else "fullscreen",
@@ -5935,10 +6356,7 @@ class PlayerPage(QWidget):
         self.fullscreen_button.setToolTip(
             "Exit fullscreen (F)" if entering else "Fullscreen (F)"
         )
-
-        QTimer.singleShot(
-            600, lambda: setattr(self, "ignore_click_release", False)
-        )
+        QTimer.singleShot(600, lambda: setattr(self, "ignore_click_release", False))
 
     def _show_feedback(self, text: str, duration: int = 520) -> None:
         self.feedback_timer.stop()
@@ -6091,13 +6509,18 @@ class PlayerPage(QWidget):
     def _position_track_panel(self) -> None:
         if not self.track_panel:
             return
-        width = max(560, min(760, self.overlay.width() - 48))
-        height = max(300, min(610, self.overlay.height() - 182))
+        if self.track_panel.objectName() == "episodePanel":
+            width = max(560, min(700, self.overlay.width() - 72))
+            height = max(300, min(620, self.overlay.height() - 170))
+            x = max(24, self.overlay.width() - width - 70)
+            y = max(24, self.bottom_bar.y() - height - 10)
+        else:
+            width = max(560, min(760, self.overlay.width() - 48))
+            height = max(300, min(610, self.overlay.height() - 182))
+            x = max(24, self.overlay.width() - width - 24)
+            y = max(24, self.bottom_bar.y() - height - 8)
         self.track_panel.setFixedSize(width, height)
-        self.track_panel.move(
-            max(24, self.overlay.width() - width - 24),
-            max(24, self.bottom_bar.y() - height - 8),
-        )
+        self.track_panel.move(x, y)
 
     def _dismiss_track_panel_at(self, global_position: QPoint) -> bool:
         panel = self.track_panel
@@ -6341,6 +6764,16 @@ class DordieWatchWindow(QMainWindow):
         self.series_backdrop_animation: Optional[QPropertyAnimation] = None
         self.series_backdrop_hiding = False
         self.player_launch_overlay: Optional[PlayerLaunchTransitionOverlay] = None
+        self.fullscreen_transition_cover = QFrame(
+            None,
+            Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint,
+        )
+        self.fullscreen_transition_cover.setObjectName("playerBlackout")
+        self.fullscreen_transition_cover.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.fullscreen_transition_cover.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.fullscreen_transition_cover.setWindowOpacity(0.0)
+        self.fullscreen_transition_cover.hide()
+        self.fullscreen_transition_cover_animation: Optional[QPropertyAnimation] = None
         self.native_resize_filter: Optional[NativePlayerResizeFilter] = None
         app = QApplication.instance()
         if app is not None:
@@ -6380,6 +6813,101 @@ class DordieWatchWindow(QMainWindow):
                 lambda url=launch_manifest_url: self.open_website_media(url),
             )
 
+    def _fullscreen_cover_geometry(self) -> QRect:
+        screen = self.windowHandle().screen() if self.windowHandle() else None
+        if screen is None:
+            screen = QApplication.screenAt(QCursor.pos())
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        geometry = screen.geometry() if screen is not None else self.frameGeometry()
+        return QRect(
+            geometry.x() - 2,
+            geometry.y() - 2,
+            geometry.width() + 4,
+            geometry.height() + 4,
+        )
+
+    def _sync_fullscreen_transition_cover(self) -> None:
+        if not hasattr(self, "fullscreen_transition_cover"):
+            return
+        self.fullscreen_transition_cover.setGeometry(self._fullscreen_cover_geometry())
+        if self.fullscreen_transition_cover.isVisible():
+            self.fullscreen_transition_cover.raise_()
+
+    def _animate_fullscreen_transition_cover(
+        self,
+        start: float,
+        end: float,
+        duration: int,
+        on_finished=None,
+    ) -> None:
+        if self.fullscreen_transition_cover_animation is not None:
+            self.fullscreen_transition_cover_animation.stop()
+            self.fullscreen_transition_cover_animation.deleteLater()
+            self.fullscreen_transition_cover_animation = None
+        self._sync_fullscreen_transition_cover()
+        self.fullscreen_transition_cover.show()
+        self.fullscreen_transition_cover.raise_()
+        QApplication.processEvents()
+        self.fullscreen_transition_cover.setWindowOpacity(start)
+        animation = QPropertyAnimation(
+            self.fullscreen_transition_cover,
+            b"windowOpacity",
+            self,
+        )
+        animation.setDuration(duration)
+        animation.setStartValue(start)
+        animation.setEndValue(end)
+        animation.setEasingCurve(QEasingCurve.InOutCubic)
+        self.fullscreen_transition_cover_animation = animation
+
+        def finish() -> None:
+            if end <= 0.0:
+                self.fullscreen_transition_cover.hide()
+            if self.fullscreen_transition_cover_animation is animation:
+                self.fullscreen_transition_cover_animation = None
+            animation.deleteLater()
+            if on_finished is not None:
+                on_finished()
+
+        animation.finished.connect(finish)
+        animation.start()
+
+    def _fade_fullscreen_transition_cover_out(self) -> None:
+        self._animate_fullscreen_transition_cover(
+            float(self.fullscreen_transition_cover.windowOpacity()),
+            0.0,
+            360,
+        )
+
+    def toggle_player_fullscreen_with_fade(self) -> None:
+        if self.pages.currentWidget() is not self.player or self.player.movie is None:
+            return
+        entering = not self.is_player_fullscreen()
+        diagnostic_log(
+            "window.fullscreen_fade_toggle",
+            entering=entering,
+            window=widget_snapshot(self),
+            player=widget_snapshot(self.player),
+        )
+        self.player.click_timer.stop()
+        self.player.ignore_click_release = True
+        self.player._close_track_panel(reveal_controls=False)
+        self.player.hide_timer.stop()
+        self.player._stop_control_animation()
+
+        def switch_state() -> None:
+            self.player.overlay.hide()
+            if entering:
+                self.enter_player_fullscreen()
+            else:
+                self.exit_player_fullscreen()
+            QTimer.singleShot(
+                600,
+                lambda: setattr(self.player, "ignore_click_release", False),
+            )
+
+        self._animate_fullscreen_transition_cover(0.0, 1.0, 320, switch_state)
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
         if event.type() == QEvent.WindowStateChange and hasattr(self, "player"):
@@ -6527,6 +7055,7 @@ class DordieWatchWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+        self._sync_fullscreen_transition_cover()
         diagnostic_log(
             "window.fullscreen.enter.after_show",
             window=widget_snapshot(self),
@@ -6583,6 +7112,7 @@ class DordieWatchWindow(QMainWindow):
         )
         self.raise_()
         self.activateWindow()
+        self._sync_fullscreen_transition_cover()
         set_player_button_icon(self.player.fullscreen_button, "fullscreen")
         self.player.fullscreen_button.setToolTip("Fullscreen (F)")
         QTimer.singleShot(40, self._finish_fullscreen_transition)
@@ -6602,6 +7132,7 @@ class DordieWatchWindow(QMainWindow):
             )
         self.player.recover_after_fullscreen_transition()
         self._player_fullscreen_transitioning = False
+        QTimer.singleShot(180, self._fade_fullscreen_transition_cover_out)
 
     def rebuild_home(self, *_args) -> None:
         self.home.rebuild(self.roots, self.movies, self.home.search.text())
@@ -7033,6 +7564,23 @@ class DordieWatchWindow(QMainWindow):
             self.series_backdrop.hide()
         self.series_backdrop_hiding = False
 
+    def _collection_for_movie(self, movie: Movie) -> Optional[LibraryCollection]:
+        return next(
+            (
+                collection
+                for collection in build_collections(self.movies, self.roots)
+                if any(item.path == movie.path for item in collection.movies)
+            ),
+            None,
+        )
+
+    def _prepare_player_playlist(self, movie: Movie) -> None:
+        collection = self._collection_for_movie(movie)
+        if collection is None:
+            self.player.set_playlist([movie], movie, "")
+            return
+        self.player.set_playlist(collection.movies, movie, collection.title)
+
     def play_movie(self, movie: Movie) -> None:
         if not Path(movie.path).is_file():
             QMessageBox.warning(self, APP_NAME, "This video is no longer available.")
@@ -7046,6 +7594,7 @@ class DordieWatchWindow(QMainWindow):
             if current_page in {self.home, self.collection_page}
             else self.home
         )
+        self._prepare_player_playlist(movie)
         self.pages.setCurrentWidget(self.player)
         self.player.play_movie(movie)
 
@@ -7117,6 +7666,7 @@ class DordieWatchWindow(QMainWindow):
             if current_page in {self.home, self.collection_page}
             else self.home
         )
+        self._prepare_player_playlist(movie)
         self.pages.setCurrentWidget(self.player)
         self.player.play_movie(movie)
         QTimer.singleShot(180, overlay.finish)
@@ -7176,6 +7726,7 @@ class DordieWatchWindow(QMainWindow):
         if self.series_dialog is not None:
             self.series_dialog.recenter()
             self.series_dialog.raise_()
+        self._sync_fullscreen_transition_cover()
 
     def closeEvent(self, event) -> None:
         if self.scan_task:
@@ -7322,6 +7873,59 @@ QMenu#seriesEpisodeRangeMenu::item {
 }
 QMenu#seriesEpisodeRangeMenu::item:selected {
     background: #333333;
+}
+
+#playerBlackout {
+    background: #000000;
+    border: none;
+}
+#episodePanel {
+    background: #262626;
+    border: none;
+}
+#episodePanelScroll, #episodePanelScroll > QWidget > QWidget, #episodePanelContents {
+    background: transparent;
+}
+#episodePanelBack {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin-right: 6px;
+}
+#episodePanelBack:hover, #episodePanelBack:pressed {
+    background: transparent;
+    border: none;
+}
+#episodePanelTitle {
+    color: #ffffff;
+    font-size: 28px;
+    font-weight: 900;
+}
+#episodeRangePanelTitle {
+    background: transparent;
+    color: #ffffff;
+    font-size: 28px;
+    font-weight: 900;
+}
+#episodeRangeContents {
+    background: #262626;
+}
+#episodeRangeOption {
+    background: #262626;
+    border: none;
+    color: #f2f2f2;
+    font-size: 23px;
+    font-weight: 800;
+    min-height: 54px;
+    padding: 0 20px;
+    text-align: left;
+}
+#episodeRangeOption[active="true"] {
+    border: 2px solid #ffffff;
+    padding-left: 12px;
+}
+#episodeRangeOption:hover, #episodeRangeOption:pressed {
+    background: #262626;
 }
 
 #seriesEpisodeDivider {
@@ -7738,3 +8342,11 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
+
+
+
