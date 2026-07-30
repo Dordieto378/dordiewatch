@@ -4838,16 +4838,16 @@ class PlayerPage(QWidget):
         self.top_bar.installEventFilter(self)
         self.top_opacity = QGraphicsOpacityEffect(self.top_bar)
         self.top_opacity.setOpacity(1.0)
-        top_layout = QHBoxLayout(self.top_bar)
-        top_layout.setContentsMargins(18, 18, 18, 18)
+        self.top_layout = QHBoxLayout(self.top_bar)
+        self.top_layout.setContentsMargins(18, 18, 18, 18)
         self.back_button = StaticIconButton()
         self.back_button.setObjectName("playerIcon")
         set_player_button_icon(self.back_button, "back")
         self.back_button.setToolTip("Back (Esc)")
         self.title = QLabel("")
         self.title.setObjectName("playerTitle")
-        top_layout.addWidget(self.back_button)
-        top_layout.addStretch()
+        self.top_layout.addWidget(self.back_button)
+        self.top_layout.addStretch()
         self.back_button.clicked.connect(self.close_player)
 
         self.bottom_bar = QFrame(self.overlay)
@@ -4856,9 +4856,9 @@ class PlayerPage(QWidget):
         self.bottom_bar.installEventFilter(self)
         self.bottom_opacity = QGraphicsOpacityEffect(self.bottom_bar)
         self.bottom_opacity.setOpacity(1.0)
-        bottom_layout = QVBoxLayout(self.bottom_bar)
-        bottom_layout.setContentsMargins(20, 4, 20, 8)
-        bottom_layout.setSpacing(8)
+        self.bottom_layout = QVBoxLayout(self.bottom_bar)
+        self.bottom_layout.setContentsMargins(20, 4, 20, 8)
+        self.bottom_layout.setSpacing(8)
         self.timeline = SeekSlider(Qt.Horizontal)
         self.timeline.setObjectName("timeline")
         self.timeline.setRange(0, 0)
@@ -4875,7 +4875,7 @@ class PlayerPage(QWidget):
         progress_layout.setSpacing(10)
         progress_layout.addWidget(self.timeline, 1)
         progress_layout.addWidget(self.time_label)
-        bottom_layout.addLayout(progress_layout)
+        self.bottom_layout.addLayout(progress_layout)
         controls = QHBoxLayout()
         controls.setSpacing(0)
         left_controls = QHBoxLayout()
@@ -4931,7 +4931,7 @@ class PlayerPage(QWidget):
         controls.addLayout(left_controls, 1)
         controls.addWidget(self.title, 0, Qt.AlignCenter)
         controls.addLayout(right_controls, 1)
-        bottom_layout.addLayout(controls)
+        self.bottom_layout.addLayout(controls)
 
         self.top_control_ghost = QLabel(self.overlay)
         self.top_control_ghost.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -5494,11 +5494,12 @@ class PlayerPage(QWidget):
 
     def recover_after_fullscreen_transition(self) -> None:
         self.fullscreen_recovery_generation += 1
+        generation = self.fullscreen_recovery_generation
         if self.movie is None:
             return
         diagnostic_log(
             "player.fullscreen_recover",
-            generation=self.fullscreen_recovery_generation,
+            generation=generation,
             player=widget_snapshot(self),
             window=widget_snapshot(self.window()) if self.window() else "none",
             fullscreen=self.window().is_player_fullscreen()
@@ -5508,10 +5509,20 @@ class PlayerPage(QWidget):
             else False,
             native_fullscreen=self.window().isFullScreen() if self.window() else False,
         )
+        self._settle_fullscreen_layout(generation)
+        for delay in (25, 75, 150, 300):
+            QTimer.singleShot(
+                delay,
+                lambda active=generation: self._settle_fullscreen_layout(active),
+            )
+
+    def _settle_fullscreen_layout(self, generation: int) -> None:
+        if generation != self.fullscreen_recovery_generation or self.movie is None:
+            return
         self.controls_visible = True
         self.top_opacity.setOpacity(1.0)
         self.bottom_opacity.setOpacity(1.0)
-        self._snap_layout_for_resize()
+        self._force_integrated_window_layout()
         self.overlay.show()
         self.overlay.raise_()
         if self.playback_blackout.isVisible():
@@ -5521,6 +5532,8 @@ class PlayerPage(QWidget):
         self.bottom_bar.show()
         self.top_bar.move(0, 0)
         self.bottom_bar.move(0, self.overlay.height() - self.bottom_bar.height())
+        self.top_bar.raise_()
+        self.bottom_bar.raise_()
 
     def begin_interactive_resize(self) -> None:
         self.interactive_resizing = True
@@ -5563,6 +5576,27 @@ class PlayerPage(QWidget):
             self.video_surface.setGeometry(target)
         self.video_surface.lower()
 
+    def _player_fullscreen_active(self) -> bool:
+        window = self.window()
+        if hasattr(window, "is_player_fullscreen"):
+            return bool(window.is_player_fullscreen())
+        return bool(window and window.isFullScreen())
+
+    def _control_bar_sizes(self) -> tuple[int, int]:
+        if self._player_fullscreen_active():
+            return 118, 136
+        return 96, 108
+
+    def _apply_control_bar_margins(self) -> None:
+        if not hasattr(self, "top_layout") or not hasattr(self, "bottom_layout"):
+            return
+        if self._player_fullscreen_active():
+            self.top_layout.setContentsMargins(28, 34, 28, 18)
+            self.bottom_layout.setContentsMargins(28, 8, 28, 28)
+        else:
+            self.top_layout.setContentsMargins(18, 18, 18, 18)
+            self.bottom_layout.setContentsMargins(20, 4, 20, 8)
+
     def _sync_overlay_geometry(self) -> None:
         if not hasattr(self, "overlay") or not hasattr(self, "top_bar"):
             return
@@ -5573,15 +5607,17 @@ class PlayerPage(QWidget):
             self.playback_blackout.setGeometry(self.overlay.rect())
         if hasattr(self, "fullscreen_fade"):
             self.fullscreen_fade.setGeometry(target)
-        self.top_bar.resize(self.overlay.width(), 96)
-        self.bottom_bar.resize(self.overlay.width(), 108)
+        self._apply_control_bar_margins()
+        top_height, bottom_height = self._control_bar_sizes()
+        self.top_bar.resize(self.overlay.width(), top_height)
+        self.bottom_bar.resize(self.overlay.width(), bottom_height)
         if not self.controls_animating:
             top_hidden_offset = 16
             bottom_hidden_offset = 22
             self.top_bar.move(0, 0 if self.controls_visible else -top_hidden_offset)
             self.bottom_bar.move(
                 0,
-                self.overlay.height() - 108 + (0 if self.controls_visible else bottom_hidden_offset),
+                self.overlay.height() - bottom_height + (0 if self.controls_visible else bottom_hidden_offset),
             )
         self.toast.adjustSize()
         self.toast.move(
@@ -6018,6 +6054,13 @@ class PlayerPage(QWidget):
             self.progress_saved.emit(
                 self.movie, self.movie.duration_ms or self.controller.length(), True
             )
+        if self.playlist_index >= 0 and self.playlist_index < len(self.playlist) - 1:
+            next_movie = self.playlist[self.playlist_index + 1]
+            self.playlist_index += 1
+            self._show_playback_blackout()
+            self._close_track_panel(reveal_controls=False)
+            self.play_movie(next_movie, start_ms=0, autoplay=True)
+            return
         self.close_player()
 
     def _show_controls(self, keep: bool = False) -> None:
@@ -7128,6 +7171,7 @@ class DordieWatchWindow(QMainWindow):
                 False, "fullscreen_transition_finished"
             )
         self.player.recover_after_fullscreen_transition()
+        self._schedule_player_fullscreen_layout_settle()
         self._player_fullscreen_transitioning = False
         QTimer.singleShot(180, self._fade_fullscreen_transition_cover_out)
 
@@ -7561,6 +7605,20 @@ class DordieWatchWindow(QMainWindow):
             self.series_backdrop.hide()
         self.series_backdrop_hiding = False
 
+    def _library_movie_for_path(self, path: str) -> Optional[Movie]:
+        try:
+            target = str(Path(path).resolve()).casefold()
+        except OSError:
+            target = str(path).casefold()
+        for movie in self.movies:
+            try:
+                current = str(Path(movie.path).resolve()).casefold()
+            except OSError:
+                current = str(movie.path).casefold()
+            if current == target:
+                return movie
+        return None
+
     def _collection_for_movie(self, movie: Movie) -> Optional[LibraryCollection]:
         return next(
             (
@@ -7579,6 +7637,9 @@ class DordieWatchWindow(QMainWindow):
         self.player.set_playlist(collection.movies, movie, collection.title)
 
     def play_movie(self, movie: Movie) -> None:
+        library_movie = self._library_movie_for_path(movie.path)
+        if library_movie is not None:
+            movie = library_movie
         if not Path(movie.path).is_file():
             QMessageBox.warning(self, APP_NAME, "This video is no longer available.")
             return
@@ -7657,6 +7718,9 @@ class DordieWatchWindow(QMainWindow):
     def _start_player_after_launch_transition(
         self, movie: Movie, overlay: PlayerLaunchTransitionOverlay
     ) -> None:
+        library_movie = self._library_movie_for_path(movie.path)
+        if library_movie is not None:
+            movie = library_movie
         current_page = self.pages.currentWidget()
         self.player_return_page = (
             current_page
@@ -7699,9 +7763,14 @@ class DordieWatchWindow(QMainWindow):
             self.player.close_player()
 
     def save_progress(self, movie: Movie, progress: int, completed: bool) -> None:
-        movie.progress_ms = 0 if completed else max(0, progress)
-        movie.completed = completed
-        movie.last_played = time.time()
+        target_movie = self._library_movie_for_path(movie.path) or movie
+        target_movie.progress_ms = 0 if completed else max(0, progress)
+        target_movie.completed = completed
+        target_movie.last_played = time.time()
+        if target_movie is not movie:
+            movie.progress_ms = target_movie.progress_ms
+            movie.completed = target_movie.completed
+            movie.last_played = target_movie.last_played
         self.save_library()
 
     def save_library(self) -> None:
@@ -7724,6 +7793,25 @@ class DordieWatchWindow(QMainWindow):
             self.series_dialog.recenter()
             self.series_dialog.raise_()
         self._sync_fullscreen_transition_cover()
+        if (
+            hasattr(self, "player")
+            and self.pages.currentWidget() is self.player
+            and (self._player_fullscreen or self._player_fullscreen_transitioning)
+        ):
+            self._schedule_player_fullscreen_layout_settle()
+
+    def _schedule_player_fullscreen_layout_settle(self) -> None:
+        if not hasattr(self, "player") or self.pages.currentWidget() is not self.player:
+            return
+        if self.player.movie is None:
+            return
+        self.player.fullscreen_recovery_generation += 1
+        generation = self.player.fullscreen_recovery_generation
+        for delay in (0, 25, 75, 150, 300):
+            QTimer.singleShot(
+                delay,
+                lambda active=generation: self.player._settle_fullscreen_layout(active),
+            )
 
     def closeEvent(self, event) -> None:
         if self.scan_task:
@@ -8339,6 +8427,11 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
 
 
 
