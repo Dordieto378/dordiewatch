@@ -4658,13 +4658,16 @@ def build_player_control_icon(kind: str) -> QIcon:
         painter.drawPath(path)
         painter.drawLine(25, 7, 25, 25)
     elif kind == "episodes":
-        painter.setPen(QPen(QColor("#ffffff"), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        layer_pen = QPen(QColor("#ffffff"), 2.45, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(layer_pen)
         painter.setBrush(Qt.NoBrush)
-        painter.drawRoundedRect(QRect(6, 14, 18, 11), 1.5, 1.5)
-        painter.drawLine(11, 25, 9, 28)
-        painter.drawLine(9, 28, 16, 25)
-        painter.drawRoundedRect(QRect(10, 9, 18, 11), 1.5, 1.5)
-        painter.drawRoundedRect(QRect(14, 4, 18, 11), 1.5, 1.5)
+
+        middle = QPainterPath()
+        middle.moveTo(11.0, 11.0)
+        middle.lineTo(27.5, 11.0)
+        middle.lineTo(27.5, 22.0)
+        painter.drawPath(middle)
+        painter.drawRoundedRect(QRectF(5.0, 16.0, 18.5, 10.5), 1.8, 1.8)
     elif kind in {"volume", "muted"}:
         path = QPainterPath()
         path.moveTo(5, 13)
@@ -6509,16 +6512,10 @@ class PlayerPage(QWidget):
     def _position_track_panel(self) -> None:
         if not self.track_panel:
             return
-        if self.track_panel.objectName() == "episodePanel":
-            width = max(560, min(700, self.overlay.width() - 72))
-            height = max(300, min(620, self.overlay.height() - 170))
-            x = max(24, self.overlay.width() - width - 70)
-            y = max(24, self.bottom_bar.y() - height - 10)
-        else:
-            width = max(560, min(760, self.overlay.width() - 48))
-            height = max(300, min(610, self.overlay.height() - 182))
-            x = max(24, self.overlay.width() - width - 24)
-            y = max(24, self.bottom_bar.y() - height - 8)
+        width = max(560, min(700, self.overlay.width() - 72))
+        height = max(300, min(620, self.overlay.height() - 170))
+        x = max(24, self.overlay.width() - width - 70)
+        y = max(24, self.bottom_bar.y() - height - 10)
         self.track_panel.setFixedSize(width, height)
         self.track_panel.move(x, y)
 
@@ -8342,6 +8339,21 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
