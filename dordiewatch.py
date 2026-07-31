@@ -878,6 +878,7 @@ class DordieWatchStore:
         defaults = {
             "volume": 80,
             "series_subtitles": {},
+            "subtitle_cache_ready": {},
             "dordielist_library_url": "",
         }
         if not self.file.is_file():
@@ -1732,6 +1733,57 @@ class SubtitleCacheTask:
                 self.signals.failed.emit(str(error))
             except RuntimeError:
                 return
+
+class SubtitleCacheStatusSignals(QObject):
+    finished = Signal(object)
+
+
+class SubtitleCacheStatusTask:
+    def __init__(
+        self,
+        movies: Iterable[Movie],
+        store: DordieWatchStore,
+        task_key: str,
+    ) -> None:
+        from PySide6.QtCore import QRunnable
+
+        class Runnable(QRunnable):
+            def __init__(inner, owner: "SubtitleCacheStatusTask") -> None:
+                super().__init__()
+                inner.owner = owner
+
+            def run(inner) -> None:
+                inner.owner.run()
+
+        self.movies = tuple(Movie.from_dict(movie.to_dict()) for movie in movies)
+        self.store = store
+        self.task_key = task_key
+        self.signals = SubtitleCacheStatusSignals()
+        self.runnable = Runnable(self)
+        self.ffmpeg = find_binary("ffmpeg")
+        self.ffprobe = find_binary("ffprobe")
+
+    def run(self) -> None:
+        expected_tracks = 0
+        ready_tracks = 0
+        for movie in self.movies:
+            expected, ready = subtitle_cache_readiness_for_movie(
+                movie,
+                self.store.subtitle_cache_dir,
+                self.ffprobe,
+                self.ffmpeg,
+            )
+            expected_tracks += expected
+            ready_tracks += ready
+        self.signals.finished.emit(
+            {
+                "key": self.task_key,
+                "videos": len(self.movies),
+                "expected": expected_tracks,
+                "ready": ready_tracks,
+            }
+        )
+
 
 class MovieCard(QWidget):
     activated = Signal(object)
@@ -2811,6 +2863,29 @@ class ThinCloseButton(QToolButton):
         )
 
 
+class ElidedLabel(QLabel):
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent)
+        self._full_text = text
+        self._elide_mode = Qt.ElideRight
+        self.setText(text)
+
+    def setText(self, text: str) -> None:
+        self._full_text = text or ""
+        self.setToolTip(self._full_text)
+        self._update_elided_text()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_elided_text()
+
+    def _update_elided_text(self) -> None:
+        metrics = self.fontMetrics()
+        available = max(0, self.contentsRect().width())
+        elided = metrics.elidedText(self._full_text, self._elide_mode, available)
+        QLabel.setText(self, elided)
+
+
 class SeriesHeroOverlay(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -2858,8 +2933,9 @@ class SeriesHero(QWidget):
         top.addWidget(close_button)
         layout.addLayout(top)
         layout.addStretch()
-        self.title = QLabel(collection.title)
+        self.title = ElidedLabel(collection.title)
         self.title.setObjectName("seriesTitle")
+        self.title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.meta = QLabel(f"{len(collection.movies)} Episodes")
         self.meta.setObjectName("seriesMeta")
         self.meta.setVisible(len(collection.movies) > 1)
@@ -3061,6 +3137,7 @@ class SeriesDetailsDialog(QWidget):
         self.hero.play_requested.connect(lambda: self._play_movie(collection.representative))
         self.cache_button: Optional[QPushButton] = None
         self.subtitle_cache_busy = False
+        self.subtitle_cache_ready = False
         self.subtitle_cache_text = "Cache Subtitles"
 
         scroll = QScrollArea()
@@ -3191,8 +3268,8 @@ class SeriesDetailsDialog(QWidget):
         button = self.cache_button
         if button is None:
             return
-        button.setEnabled(not self.subtitle_cache_busy)
-        button.setText(self.subtitle_cache_text or "Cache Subtitles")
+        button.setEnabled(not self.subtitle_cache_busy and not self.subtitle_cache_ready)
+        button.setText(self.subtitle_cache_text or ("Cache Saved" if self.subtitle_cache_ready else "Cache Subtitles"))
 
     def _build_movie_cache_row(self) -> QWidget:
         row_widget = QWidget()
@@ -3220,11 +3297,6 @@ class SeriesDetailsDialog(QWidget):
         if total > self.episode_page_size:
             heading_row.addSpacing(12)
             heading_row.addWidget(self._build_episode_range_button())
-        else:
-            heading_row.addSpacing(12)
-            series_name = QLabel(self.collection.title)
-            series_name.setObjectName("seriesEpisodesName")
-            heading_row.addWidget(series_name)
         self.episodes_layout.addLayout(heading_row)
         self.episodes_layout.addSpacing(16)
 
@@ -3493,12 +3565,21 @@ class SeriesDetailsDialog(QWidget):
 
     def set_subtitle_cache_busy(self, busy: bool, text: str = "") -> None:
         self.subtitle_cache_busy = busy
+        if busy:
+            self.subtitle_cache_ready = False
         self.subtitle_cache_text = text or ("Caching..." if busy else "Cache Subtitles")
+        self._sync_cache_button()
+
+    def set_subtitle_cache_ready(self, ready: bool, text: str = "") -> None:
+        self.subtitle_cache_busy = False
+        self.subtitle_cache_ready = ready
+        self.subtitle_cache_text = text or ("Cache Saved" if ready else "Cache Subtitles")
         self._sync_cache_button()
 
     def set_subtitle_cache_status(self, text: str) -> None:
         self.subtitle_cache_busy = False
-        self.subtitle_cache_text = text or "Cache Subtitles"
+        self.subtitle_cache_ready = text.casefold() in {"cache ready", "cache saved", "saved"}
+        self.subtitle_cache_text = text or ("Cache Saved" if self.subtitle_cache_ready else "Cache Subtitles")
         self._sync_cache_button()
 
     def _play_movie(self, movie: Movie) -> None:
@@ -4197,6 +4278,64 @@ def cached_subtitle_tracks_for_movie(
         ) or "none",
     )
     return tracks
+
+
+def subtitle_cache_readiness_for_movie(
+    movie: Movie,
+    cache_dir: Path,
+    ffprobe: Optional[str],
+    ffmpeg: Optional[str],
+) -> tuple[int, int]:
+    expected = 0
+    ready = 0
+    source = external_subtitle_source_for_movie(movie)
+    if source is not None:
+        expected += 1
+        if source.suffix.casefold() not in {".ass", ".ssa"}:
+            ready += 1
+        else:
+            try:
+                stat = source.stat()
+                identity = (
+                    f"external|{SUBTITLE_STYLE_CACHE_VERSION}|{source.resolve()}|"
+                    f"{stat.st_size}|{stat.st_mtime_ns}|{APP_FONT_FAMILY}"
+                )
+                digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
+                if (cache_dir / f"{digest}{source.suffix.casefold()}").is_file():
+                    ready += 1
+            except OSError:
+                pass
+    if not ffmpeg or not ffprobe:
+        return expected, ready
+    video = Path(movie.path)
+    try:
+        stat = video.stat()
+    except OSError:
+        return expected, ready
+    for stream in probe_subtitle_streams(video, ffprobe):
+        codec = safe_description(str(stream.get("codec_name", ""))).casefold()
+        extension = SUBTITLE_CODEC_EXTENSIONS.get(codec)
+        if not extension:
+            continue
+        try:
+            stream_index = int(stream.get("index"))
+        except (TypeError, ValueError):
+            continue
+        expected += 1
+        identity = (
+            f"embedded|{SUBTITLE_STYLE_CACHE_VERSION}|{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|"
+            f"{stream_index}|{codec}|{APP_FONT_FAMILY}"
+        )
+        digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
+        if (cache_dir / f"{digest}{extension}").is_file():
+            ready += 1
+    diagnostic_log(
+        "subtitle.cache.readiness",
+        movie=movie.title,
+        expected=expected,
+        ready=ready,
+    )
+    return expected, ready
 
 
 class MpvVideoSurface(QOpenGLWidget):
@@ -8093,6 +8232,10 @@ class DordieWatchWindow(QMainWindow):
         self.subtitle_cache_task: Optional[SubtitleCacheTask] = None
         self.subtitle_cache_task_key = ""
         self.subtitle_cache_token = 0
+        ready_setting = self.settings.get("subtitle_cache_ready", {})
+        self.subtitle_cache_ready_keys: set[str] = {
+            str(key) for key, value in ready_setting.items() if value
+        } if isinstance(ready_setting, dict) else set()
         self.scan_token = 0
         self.scan_progress_map: dict[str, tuple[int, float, bool]] = {}
         self.scan_seen_paths: set[str] = set()
@@ -8824,6 +8967,10 @@ class DordieWatchWindow(QMainWindow):
         dialog.subtitle_cache_requested.connect(self.cache_subtitles_for_collection)
         if self.subtitle_cache_task_key == collection.folder and self.subtitle_cache_task is not None:
             dialog.set_subtitle_cache_busy(True, "Caching...")
+        elif self._subtitle_cache_is_ready(collection.folder):
+            dialog.set_subtitle_cache_ready(True, "Cache Saved")
+        else:
+            dialog.set_subtitle_cache_ready(False, "Cache Subtitles")
         dialog.finished.connect(
             lambda *_args, active=dialog: self._clear_series_dialog(active)
         )
@@ -8840,8 +8987,64 @@ class DordieWatchWindow(QMainWindow):
         ):
             self.home.set_scanning(None)
 
+    def _subtitle_cache_flags(self) -> dict:
+        flags = self.settings.get("subtitle_cache_ready")
+        if not isinstance(flags, dict):
+            flags = {}
+            self.settings["subtitle_cache_ready"] = flags
+        return flags
+
+    def _subtitle_cache_is_ready(self, key: str) -> bool:
+        key = str(key)
+        return key in self.subtitle_cache_ready_keys or bool(self._subtitle_cache_flags().get(key))
+
+    def _set_subtitle_cache_ready_flag(self, key: str, ready: bool, save: bool = True) -> None:
+        key = str(key)
+        flags = self._subtitle_cache_flags()
+        if ready:
+            self.subtitle_cache_ready_keys.add(key)
+            flags[key] = True
+        else:
+            self.subtitle_cache_ready_keys.discard(key)
+            flags.pop(key, None)
+        if save:
+            self.save_library()
+
+    def _start_subtitle_cache_status_check(self, collection: LibraryCollection) -> None:
+        if not collection.movies:
+            return
+        self.subtitle_cache_status_token += 1
+        token = self.subtitle_cache_status_token
+        task = SubtitleCacheStatusTask(collection.movies, self.store, collection.folder)
+        self.subtitle_cache_status_task = task
+        task.signals.finished.connect(
+            lambda payload, active=token: self._subtitle_cache_status_finished(active, payload)
+        )
+        QThreadPool.globalInstance().start(task.runnable)
+
+    def _subtitle_cache_status_finished(self, token: int, payload: dict) -> None:
+        if token != self.subtitle_cache_status_token:
+            return
+        self.subtitle_cache_status_task = None
+        key = str(payload.get("key") or "")
+        expected = int(payload.get("expected") or 0)
+        ready = int(payload.get("ready") or 0)
+        is_ready = expected > 0 and ready >= expected
+        if is_ready:
+            self._set_subtitle_cache_ready_flag(key, True)
+        else:
+            self._set_subtitle_cache_ready_flag(key, False)
+        dialog = self.series_dialog
+        if dialog is not None and dialog.collection.folder == key:
+            dialog.set_subtitle_cache_ready(is_ready, "Cache Saved" if is_ready else "Cache Subtitles")
+
     def cache_subtitles_for_collection(self, collection: LibraryCollection) -> None:
         if not collection.movies:
+            return
+        if self._subtitle_cache_is_ready(collection.folder):
+            dialog = self.series_dialog
+            if dialog is not None and dialog.collection.folder == collection.folder:
+                dialog.set_subtitle_cache_ready(True, "Cache Saved")
             return
         if self.subtitle_cache_task is not None:
             dialog = self.series_dialog
@@ -8890,13 +9093,16 @@ class DordieWatchWindow(QMainWindow):
         created = int(payload.get("created") or 0)
         if tracks <= 0:
             message = "No Subtitles"
-        elif created <= 0:
-            message = "Cache Ready"
+            self._set_subtitle_cache_ready_flag(key, False)
         else:
-            message = "Cache Ready"
+            message = "Cache Saved"
+            self._set_subtitle_cache_ready_flag(key, True)
         dialog = self.series_dialog
         if dialog is not None and dialog.collection.folder == key:
-            dialog.set_subtitle_cache_busy(False, message)
+            if tracks <= 0:
+                dialog.set_subtitle_cache_ready(False, message)
+            else:
+                dialog.set_subtitle_cache_ready(True, message)
         self.subtitle_cache_task_key = ""
         self._set_home_activity_idle_if_possible()
 
