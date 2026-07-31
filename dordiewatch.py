@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import binascii
@@ -321,6 +321,41 @@ def diagnostic_log(event: str, **fields) -> None:
             pass
 
 
+def diagnostic_path_summary(path: object) -> str:
+    if not path:
+        return "none"
+    try:
+        candidate = Path(str(path))
+        if candidate.is_file():
+            stat = candidate.stat()
+            return f"file:{candidate}|size:{stat.st_size}|mtime:{stat.st_mtime_ns}"
+        if candidate.exists():
+            return f"exists:{candidate}"
+        return f"missing:{candidate}"
+    except OSError as error:
+        return f"error:{path}|{error!r}"
+
+
+def diagnostic_tracks_summary(tracks: object) -> str:
+    if not isinstance(tracks, list):
+        return str(type(tracks).__name__)
+    parts: list[str] = []
+    for index, track in enumerate(tracks[:12]):
+        if isinstance(track, dict):
+            parts.append(
+                "{" + ",".join(
+                    f"{key}={track.get(key)}"
+                    for key in ("id", "type", "title", "lang", "codec", "external", "selected")
+                    if key in track
+                ) + "}"
+            )
+        else:
+            parts.append(str(track))
+    if len(tracks) > 12:
+        parts.append(f"...+{len(tracks) - 12}")
+    return "; ".join(parts)
+
+
 def widget_snapshot(widget: QWidget) -> str:
     try:
         geometry = widget.geometry()
@@ -636,7 +671,7 @@ def build_collections(
                 for movie in items
                 if movie.collection_title.strip()
             ),
-            folder.stem if folder_is_file else folder.name,
+            media_title_from_folder_name(folder.stem if folder_is_file else folder.name),
         )
         database_covers = (
             database_cover_for_movie(movie) for movie in items
@@ -665,48 +700,167 @@ def match_website_collection(
     except (TypeError, ValueError):
         return None
 
-    return next(
-        (
-            collection
-            for collection in collections
-            if any(movie.media_id == media_id for movie in collection.movies)
-        ),
-        None,
-    )
+    for collection in collections:
+        if any(movie.media_id == media_id for movie in collection.movies):
+            return collection
+        folder = collection_filesystem_folder(collection)
+        if folder.is_dir() and media_id in collection_database_ids(folder):
+            return collection
+    return None
 
 
 MEDIA_LINK_FILENAME = ".dordielist.json"
+MEDIA_ID_FOLDER_PATTERN = re.compile(r"\[(\d+)\]")
+TRAILING_MEDIA_IDS_PATTERN = re.compile(r"(?:\s*\[\d+\])+\s*$")
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+def media_ids_from_folder_name(name: str) -> list[int]:
+    clean_name = str(name).strip()
+    ids: list[int] = []
+    for raw_id in MEDIA_ID_FOLDER_PATTERN.findall(clean_name):
+        try:
+            media_id = int(raw_id)
+        except ValueError:
+            continue
+        if media_id > 0 and media_id not in ids:
+            ids.append(media_id)
+    if ids:
+        return ids
+    if clean_name.isdigit():
+        media_id = int(clean_name)
+        return [media_id] if media_id > 0 else []
+    return []
+
+
+def media_id_from_folder_name(name: str) -> Optional[int]:
+    ids = media_ids_from_folder_name(name)
+    return ids[0] if ids else None
+
+
+def media_title_from_folder_name(name: str) -> str:
+    title = TRAILING_MEDIA_IDS_PATTERN.sub("", str(name)).strip()
+    return title or str(name).strip()
+
+
+def safe_media_folder_title(title: str, fallback: str = "Anime") -> str:
+    clean_title = media_title_from_folder_name(title or "").strip() or fallback
+    clean_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", clean_title)
+    clean_title = re.sub(r"\s+", " ", clean_title).strip(" .")
+    if not clean_title:
+        clean_title = fallback
+    if clean_title.upper() in WINDOWS_RESERVED_NAMES:
+        clean_title = f"{clean_title} Title"
+    return clean_title[:140].rstrip(" .") or fallback
+
+
+def media_folder_name(display_title: str, media_ids: int | Iterable[int]) -> str:
+    if isinstance(media_ids, int):
+        ordered_ids = [media_ids]
+    else:
+        ordered_ids = []
+        for raw_id in media_ids:
+            try:
+                media_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if media_id > 0 and media_id not in ordered_ids:
+                ordered_ids.append(media_id)
+    suffix = "".join(f" [{media_id}]" for media_id in ordered_ids)
+    return f"{safe_media_folder_title(display_title)}{suffix}"
+
+
+def collection_filesystem_folder(collection: LibraryCollection) -> Path:
+    candidate = Path(collection.folder)
+    if candidate.is_dir():
+        return candidate
+    for movie in collection.movies:
+        if movie.collection and Path(movie.collection).is_dir():
+            return Path(movie.collection)
+    for movie in collection.movies:
+        parent = Path(movie.path).parent
+        if parent.is_dir():
+            return parent
+    return candidate
+
+
+def update_collection_paths_after_folder_rename(
+    collection: LibraryCollection, old_folder: Path, new_folder: Path
+) -> None:
+    try:
+        old_resolved = old_folder.resolve()
+    except OSError:
+        old_resolved = old_folder
+    for movie in collection.movies:
+        try:
+            movie_path = Path(movie.path).resolve()
+            relative = movie_path.relative_to(old_resolved)
+            movie.path = str(new_folder / relative)
+        except (OSError, ValueError):
+            pass
+        movie.collection = str(new_folder)
+    collection.folder = str(new_folder)
+
+
+def collection_database_ids(folder: Path) -> list[int]:
+    ids = media_ids_from_folder_name(folder.name)
+    marker = folder / MEDIA_LINK_FILENAME
+    if marker.is_file():
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            marker_values = payload.get("media_ids", [])
+            if not isinstance(marker_values, list):
+                marker_values = []
+            if payload.get("media_id") is not None:
+                marker_values.append(payload.get("media_id"))
+            for raw_id in marker_values:
+                try:
+                    media_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if media_id > 0 and media_id not in ids:
+                    ids.append(media_id)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    return ids
 
 
 def collection_database_id(folder: Path) -> Optional[int]:
-    marker = folder / MEDIA_LINK_FILENAME
-    if not marker.is_file():
-        try:
-            folder_media_id = int(folder.name)
-            return folder_media_id if folder_media_id > 0 else None
-        except ValueError:
-            return None
-    try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-        media_id = int(payload.get("media_id"))
-        return media_id if media_id > 0 else None
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return None
+    ids = collection_database_ids(folder)
+    return ids[0] if ids else None
 
 
-def link_collection_to_database_id(folder: Path, media_id: int) -> Path:
+def link_collection_to_database_id(
+    folder: Path, media_id: int, display_title: str = ""
+) -> Path:
     media_id = int(media_id)
     if media_id <= 0 or not folder.is_dir():
-        raise ValueError("The local folder or database media ID is invalid.")
+        raise ValueError("The local folder or DordieList media ID is invalid.")
 
-    marker = folder / MEDIA_LINK_FILENAME
-    temporary = marker.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps({"media_id": media_id}, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(marker)
-    return marker
+    ids = collection_database_ids(folder)
+    if media_id not in ids:
+        ids.append(media_id)
+    folder_has_visible_ids = bool(media_ids_from_folder_name(folder.name))
+    base_title = media_title_from_folder_name(folder.name) if folder_has_visible_ids else display_title or folder.name
+    target_name = media_folder_name(base_title, ids)
+    target = folder.with_name(target_name)
+    try:
+        same_target = folder.resolve() == target.resolve()
+    except OSError:
+        same_target = str(folder) == str(target)
+    if same_target:
+        return folder
+    if target.exists():
+        raise FileExistsError(f"A folder already exists with this DordieList name: {target}")
+    folder.rename(target)
+    return target
 
 
 class DordieWatchStore:
@@ -714,8 +868,10 @@ class DordieWatchStore:
         self.base_dir = app_data_dir()
         self.preview_dir = self.base_dir / "previews"
         self.website_cover_dir = self.base_dir / "website-covers"
+        self.subtitle_cache_dir = self.base_dir / "subtitle-cache"
         self.preview_dir.mkdir(parents=True, exist_ok=True)
         self.website_cover_dir.mkdir(parents=True, exist_ok=True)
+        self.subtitle_cache_dir.mkdir(parents=True, exist_ok=True)
         self.file = self.base_dir / "library.json"
 
     def load(self) -> tuple[list[str], list[Movie], dict]:
@@ -807,7 +963,7 @@ def _placeholder_image(path: Path, title: str) -> None:
     draw.polygon([(285, 135), (285, 225), (370, 180)], fill="#e50914")
     draw.text(
         (24, 320),
-        textwrap.shorten(title, width=60, placeholder="â€¦"),
+        textwrap.shorten(title, width=60, placeholder="…"),
         fill="#dddddd",
         font=ImageFont.load_default(),
     )
@@ -880,7 +1036,17 @@ def update_movies_from_website(
 
     updated = 0
     for movie in movies:
-        payload = media_by_id.get(movie.media_id or 0)
+        candidate_ids: list[int] = []
+        if movie.media_id is not None:
+            candidate_ids.append(movie.media_id)
+        if movie.collection:
+            for media_id in collection_database_ids(Path(movie.collection)):
+                if media_id not in candidate_ids:
+                    candidate_ids.append(media_id)
+        payload = next(
+            (media_by_id[media_id] for media_id in candidate_ids if media_id in media_by_id),
+            None,
+        )
         if payload is None:
             continue
         previous_cover_url = movie.cover_source_url
@@ -1489,6 +1655,84 @@ class PreviewGenerationTask:
                 return
 
 
+
+class SubtitleCacheSignals(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+
+class SubtitleCacheTask:
+    def __init__(
+        self,
+        movies: Iterable[Movie],
+        store: DordieWatchStore,
+        task_key: str,
+    ) -> None:
+        from PySide6.QtCore import QRunnable
+
+        class Runnable(QRunnable):
+            def __init__(inner, owner: "SubtitleCacheTask") -> None:
+                super().__init__()
+                inner.owner = owner
+
+            def run(inner) -> None:
+                inner.owner.run()
+
+        self.movies = tuple(Movie.from_dict(movie.to_dict()) for movie in movies)
+        self.store = store
+        self.task_key = task_key
+        self.signals = SubtitleCacheSignals()
+        self.runnable = Runnable(self)
+        self.cancelled = threading.Event()
+        self.ffmpeg = find_binary("ffmpeg")
+        self.ffprobe = find_binary("ffprobe")
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+    def run(self) -> None:
+        total = len(self.movies)
+        existing_tracks = 0
+        ready_tracks = 0
+        try:
+            for index, movie in enumerate(self.movies, 1):
+                if self.cancelled.is_set():
+                    return
+                self.signals.progress.emit(index - 1, total, movie.title)
+                before = cached_subtitle_tracks_for_movie(
+                    movie,
+                    self.store.subtitle_cache_dir,
+                    self.ffprobe,
+                    self.ffmpeg,
+                    create=False,
+                )
+                existing_tracks += len(before)
+                after = cached_subtitle_tracks_for_movie(
+                    movie,
+                    self.store.subtitle_cache_dir,
+                    self.ffprobe,
+                    self.ffmpeg,
+                    create=True,
+                )
+                ready_tracks += len(after)
+                self.signals.progress.emit(index, total, movie.title)
+            self.signals.finished.emit(
+                {
+                    "key": self.task_key,
+                    "videos": total,
+                    "tracks": ready_tracks,
+                    "created": max(0, ready_tracks - existing_tracks),
+                    "already": existing_tracks,
+                }
+            )
+        except Exception as error:
+            diagnostic_log("subtitle_cache_task.failed", key=self.task_key, error=repr(error))
+            try:
+                self.signals.failed.emit(str(error))
+            except RuntimeError:
+                return
+
 class MovieCard(QWidget):
     activated = Signal(object)
 
@@ -1600,7 +1844,7 @@ class MovieCard(QWidget):
         painter.drawText(
             QRect(0, self.card_height + 27, self.card_width, 14),
             Qt.AlignLeft | Qt.AlignVCenter,
-            f"{format_duration(self.movie.duration_ms)}  Â·  {format_bytes(self.movie.size)}",
+            f"{format_duration(self.movie.duration_ms)}  -  {format_bytes(self.movie.size)}",
         )
 
 
@@ -1865,7 +2109,7 @@ class HeroWidget(QWidget):
         self.meta = QLabel("")
         self.meta.setObjectName("heroMeta")
         button_row = QHBoxLayout()
-        self.play = QPushButton("â–¶  Play")
+        self.play = QPushButton("▶  Play")
         self.play.setObjectName("heroPlay")
         self.play.setText("Play")
         self.play.setIcon(build_solid_play_icon())
@@ -1916,7 +2160,7 @@ class HeroWidget(QWidget):
                 if representative.height
                 else "Local video"
             )
-            self.meta.setText(f"{details}   â€¢   {resolution}")
+            self.meta.setText(f"{details}   •   {resolution}")
             self.play.setText(
                 "Episodes" if collection.is_series else "Play"
             )
@@ -2317,7 +2561,7 @@ class HomePage(QWidget):
                 (
                     "No matching titles"
                     if words
-                    else "No titles yet\n\nPut each movie or series in its own folder inside â€œvideosâ€."
+                    else "No titles yet\n\nPut each movie or series in its own folder inside “videos”."
                 )
             )
             empty.setObjectName("homeEmpty")
@@ -2619,7 +2863,7 @@ class SeriesHero(QWidget):
         self.meta = QLabel(f"{len(collection.movies)} Episodes")
         self.meta.setObjectName("seriesMeta")
         self.meta.setVisible(len(collection.movies) > 1)
-        self.play = QPushButton("â–¶  Play")
+        self.play = QPushButton("▶  Play")
         self.play.setObjectName("seriesPlay")
         self.play.setText("Play")
         self.play.setIcon(build_solid_play_icon())
@@ -2786,6 +3030,7 @@ class PlayerLaunchTransitionOverlay(QWidget):
 
 class SeriesDetailsDialog(QWidget):
     movie_activated = Signal(object)
+    subtitle_cache_requested = Signal(object)
     finished = Signal()
 
     def __init__(
@@ -2814,6 +3059,9 @@ class SeriesDetailsDialog(QWidget):
         self.hero = SeriesHero(collection)
         self.hero.close_requested.connect(self.request_close)
         self.hero.play_requested.connect(lambda: self._play_movie(collection.representative))
+        self.cache_button: Optional[QPushButton] = None
+        self.subtitle_cache_busy = False
+        self.subtitle_cache_text = "Cache Subtitles"
 
         scroll = QScrollArea()
         scroll.setObjectName("seriesScroll")
@@ -2849,6 +3097,7 @@ class SeriesDetailsDialog(QWidget):
             self._rebuild_episode_rows()
             panel_layout.addWidget(self.episodes_shell)
         else:
+            panel_layout.addWidget(self._build_movie_cache_row())
             panel_layout.addStretch()
         content_layout.addWidget(self.panel, 0, Qt.AlignHCenter | Qt.AlignTop)
         self._outside_click_widgets = {content, scroll.viewport()}
@@ -2929,6 +3178,32 @@ class SeriesDetailsDialog(QWidget):
         button.setMenu(menu)
         return button
 
+    def _build_cache_button(self) -> QPushButton:
+        button = QPushButton("Cache Subtitles")
+        button.setObjectName("seriesCacheButton")
+        button.setFixedWidth(172)
+        button.clicked.connect(lambda: self.subtitle_cache_requested.emit(self.collection))
+        self.cache_button = button
+        self._sync_cache_button()
+        return button
+
+    def _sync_cache_button(self) -> None:
+        button = self.cache_button
+        if button is None:
+            return
+        button.setEnabled(not self.subtitle_cache_busy)
+        button.setText(self.subtitle_cache_text or "Cache Subtitles")
+
+    def _build_movie_cache_row(self) -> QWidget:
+        row_widget = QWidget()
+        row_widget.setObjectName("seriesMovieCacheRow")
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(48, 28, 48, 0)
+        row.setSpacing(0)
+        row.addStretch()
+        row.addWidget(self._build_cache_button())
+        return row_widget
+
     def _rebuild_episode_rows(self) -> None:
         if self.episodes_layout is None:
             return
@@ -2941,9 +3216,12 @@ class SeriesDetailsDialog(QWidget):
         heading.setObjectName("seriesEpisodesHeading")
         heading_row.addWidget(heading)
         heading_row.addStretch()
+        heading_row.addWidget(self._build_cache_button())
         if total > self.episode_page_size:
+            heading_row.addSpacing(12)
             heading_row.addWidget(self._build_episode_range_button())
         else:
+            heading_row.addSpacing(12)
             series_name = QLabel(self.collection.title)
             series_name.setObjectName("seriesEpisodesName")
             heading_row.addWidget(series_name)
@@ -3213,6 +3491,16 @@ class SeriesDetailsDialog(QWidget):
     def _apply_rounded_mask(self) -> None:
         self.clearMask()
 
+    def set_subtitle_cache_busy(self, busy: bool, text: str = "") -> None:
+        self.subtitle_cache_busy = busy
+        self.subtitle_cache_text = text or ("Caching..." if busy else "Cache Subtitles")
+        self._sync_cache_button()
+
+    def set_subtitle_cache_status(self, text: str) -> None:
+        self.subtitle_cache_busy = False
+        self.subtitle_cache_text = text or "Cache Subtitles"
+        self._sync_cache_button()
+
     def _play_movie(self, movie: Movie) -> None:
         if self._launching_player:
             return
@@ -3327,6 +3615,588 @@ def subtitle_preference_key_for_movie(movie: Movie) -> str:
         return str(folder.resolve())
     except OSError:
         return str(folder)
+
+SUBTITLE_EXTENSIONS = (".ass", ".ssa", ".srt")
+SUBTITLE_CODEC_EXTENSIONS = {
+    "ass": ".ass",
+    "ssa": ".ssa",
+    "subrip": ".srt",
+    "srt": ".srt",
+}
+SUBTITLE_FOLDER_NAMES = {"subs", "sub", "subtitle", "subtitles"}
+DIALOGUE_STYLE_NAMES = {"main", "default"}
+SUBTITLE_STYLE_CACHE_VERSION = "netflix-sans-bold-dialogue-v2"
+SUBTITLE_RESUME_PREROLL_MS = 1500
+
+
+def bundled_font_dir() -> Path:
+    bundled = bundle_root() / "font"
+    return bundled if bundled.is_dir() else SOURCE_ROOT / "font"
+
+
+def movie_subtitle_folder(movie: Movie) -> Path:
+    video = Path(movie.path)
+    folder = Path(movie.collection) if movie.collection else video.parent
+    if folder.is_file():
+        folder = folder.parent
+    return folder
+
+
+def external_subtitle_source_for_movie(movie: Movie) -> Optional[Path]:
+    video = Path(movie.path)
+    folder = movie_subtitle_folder(movie)
+    if not folder.is_dir():
+        diagnostic_log(
+            "subtitle.external.folder_missing",
+            movie=movie.title,
+            video=str(video),
+            folder=str(folder),
+        )
+        return None
+    subtitle_dirs: list[Path] = []
+    try:
+        for child in folder.iterdir():
+            if child.is_dir() and child.name.casefold() in SUBTITLE_FOLDER_NAMES:
+                subtitle_dirs.append(child)
+    except OSError as error:
+        diagnostic_log(
+            "subtitle.external.folder_scan_error",
+            movie=movie.title,
+            folder=str(folder),
+            error=repr(error),
+        )
+        return None
+    subtitle_dirs.sort(key=lambda path: natural_sort_key(path.name))
+    diagnostic_log(
+        "subtitle.external.scan",
+        movie=movie.title,
+        video=str(video),
+        folder=str(folder),
+        subtitle_dirs=";".join(path.name for path in subtitle_dirs) or "none",
+    )
+    for subtitle_dir in subtitle_dirs:
+        exact_matches = [subtitle_dir / f"{video.stem}{extension}" for extension in SUBTITLE_EXTENSIONS]
+        for candidate in exact_matches:
+            if candidate.is_file():
+                diagnostic_log(
+                    "subtitle.external.exact_match",
+                    movie=movie.title,
+                    source=diagnostic_path_summary(candidate),
+                )
+                return candidate
+        try:
+            loose_matches = [
+                item
+                for item in subtitle_dir.iterdir()
+                if item.is_file()
+                and item.suffix.casefold() in SUBTITLE_EXTENSIONS
+                and item.stem.casefold() == video.stem.casefold()
+            ]
+        except OSError as error:
+            diagnostic_log(
+                "subtitle.external.dir_error",
+                movie=movie.title,
+                subtitle_dir=str(subtitle_dir),
+                error=repr(error),
+            )
+            continue
+        if loose_matches:
+            loose_matches.sort(
+                key=lambda path: (
+                    SUBTITLE_EXTENSIONS.index(path.suffix.casefold())
+                    if path.suffix.casefold() in SUBTITLE_EXTENSIONS
+                    else 99,
+                    natural_sort_key(path.name),
+                )
+            )
+            diagnostic_log(
+                "subtitle.external.loose_match",
+                movie=movie.title,
+                source=diagnostic_path_summary(loose_matches[0]),
+            )
+            return loose_matches[0]
+    diagnostic_log("subtitle.external.none", movie=movie.title, video=str(video), folder=str(folder))
+    return None
+
+
+def _read_subtitle_text(path: Path) -> tuple[str, str]:
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            return path.read_text(encoding=encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace"), "utf-8"
+
+
+def _replace_ass_field(value: str, replacement: str) -> str:
+    leading = value[: len(value) - len(value.lstrip())]
+    trailing = value[len(value.rstrip()) :]
+    return f"{leading}{replacement}{trailing}"
+
+
+ASS_EVENT_SORT_MARKER = "; DordieWatch: ASS events sorted chronologically"
+
+
+def _ass_time_to_ms(value: str) -> int:
+    try:
+        hours, minutes, seconds = value.strip().split(":", 2)
+        return int(round((int(hours) * 3600 + int(minutes) * 60 + float(seconds)) * 1000))
+    except (TypeError, ValueError):
+        return 2**63 - 1
+
+
+def _ass_event_sort_key(item: tuple[int, str]) -> tuple[int, int, int]:
+    index, line = item
+    try:
+        _prefix, payload = line.split(":", 1)
+        parts = payload.split(",", 9)
+        if len(parts) >= 3:
+            return (_ass_time_to_ms(parts[1]), _ass_time_to_ms(parts[2]), index)
+    except ValueError:
+        pass
+    return (2**63 - 1, 2**63 - 1, index)
+
+
+def _sort_ass_event_lines(lines: list[str]) -> tuple[list[str], int]:
+    output: list[str] = []
+    index = 0
+    reordered_events = 0
+    marker_present = any(ASS_EVENT_SORT_MARKER in line for line in lines[:40])
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped.casefold() != "[events]":
+            output.append(line)
+            index += 1
+            continue
+        output.append(line)
+        index += 1
+        event_block: list[str] = []
+        while index < len(lines):
+            current = lines[index]
+            current_stripped = current.strip()
+            if current_stripped.startswith("[") and current_stripped.endswith("]"):
+                break
+            event_block.append(current)
+            index += 1
+        prefix_lines: list[str] = []
+        event_lines: list[tuple[int, str]] = []
+        suffix_lines: list[str] = []
+        seen_event = False
+        for block_index, block_line in enumerate(event_block):
+            lower = block_line.lstrip().casefold()
+            if lower.startswith(("dialogue:", "comment:")):
+                seen_event = True
+                event_lines.append((block_index, block_line))
+            elif not seen_event:
+                prefix_lines.append(block_line)
+            else:
+                suffix_lines.append(block_line)
+        sorted_events = sorted(event_lines, key=_ass_event_sort_key)
+        if [line for _idx, line in sorted_events] != [line for _idx, line in event_lines]:
+            reordered_events += len(event_lines)
+        output.extend(prefix_lines)
+        output.extend(line for _idx, line in sorted_events)
+        output.extend(suffix_lines)
+    if not marker_present:
+        insert_at = 0
+        for idx, line in enumerate(output):
+            if line.strip().casefold() == "[script info]":
+                insert_at = idx + 1
+                break
+        newline = "\r\n" if any(line.endswith("\r\n") for line in output[:20]) else "\n"
+        output.insert(insert_at, f"{ASS_EVENT_SORT_MARKER}{newline}")
+    return output, reordered_events
+
+
+def ensure_ass_cache_normalized(path: Path) -> None:
+    if path.suffix.casefold() not in {".ass", ".ssa"} or not path.is_file():
+        return
+    try:
+        text, encoding = _read_subtitle_text(path)
+        if ASS_EVENT_SORT_MARKER in "\n".join(text.splitlines()[:40]):
+            return
+        lines = text.splitlines(keepends=True)
+        sorted_lines, reordered_events = _sort_ass_event_lines(lines)
+        path.write_text("".join(sorted_lines), encoding=encoding if encoding != "cp1252" else "utf-8")
+        diagnostic_log(
+            "subtitle.ass.cache_normalized",
+            path=diagnostic_path_summary(path),
+            encoding=encoding,
+            reordered_events=reordered_events,
+        )
+    except OSError as error:
+        diagnostic_log("subtitle.ass.cache_normalize_error", path=str(path), error=repr(error))
+
+
+def rewrite_ass_dialogue_styles(source: Path, target: Path) -> None:
+    text, encoding = _read_subtitle_text(source)
+    lines = text.splitlines(keepends=True)
+    output: list[str] = []
+    in_styles = False
+    format_fields: list[str] = []
+    style_names: list[str] = []
+    rewritten_styles: list[str] = []
+    dialogue_events = 0
+    for line in lines:
+        stripped = line.strip()
+        lower = stripped.casefold()
+        if lower.startswith("dialogue:"):
+            dialogue_events += 1
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_styles = lower in {"[v4+ styles]", "[v4 styles]"}
+            output.append(line)
+            continue
+        if in_styles and lower.startswith("format:"):
+            format_fields = [field.strip().casefold() for field in line.split(":", 1)[1].split(",")]
+            output.append(line)
+            continue
+        if in_styles and lower.startswith("style:") and format_fields:
+            prefix, payload = line.split(":", 1)
+            newline = ""
+            if payload.endswith("\r\n"):
+                payload = payload[:-2]
+                newline = "\r\n"
+            elif payload.endswith("\n"):
+                payload = payload[:-1]
+                newline = "\n"
+            parts = payload.split(",", max(0, len(format_fields) - 1))
+            try:
+                name_index = format_fields.index("name")
+                font_index = format_fields.index("fontname")
+            except ValueError:
+                output.append(line)
+                continue
+            bold_index = format_fields.index("bold") if "bold" in format_fields else -1
+            required_length = max(name_index, font_index, bold_index)
+            if len(parts) > required_length:
+                style_name_raw = parts[name_index].strip()
+                style_name = style_name_raw.casefold()
+                style_names.append(style_name_raw)
+                if style_name in DIALOGUE_STYLE_NAMES:
+                    parts[font_index] = _replace_ass_field(parts[font_index], APP_FONT_FAMILY)
+                    if bold_index >= 0:
+                        parts[bold_index] = _replace_ass_field(parts[bold_index], "-1")
+                    rewritten_styles.append(style_name_raw)
+                    line = f"{prefix}:{','.join(parts)}{newline}"
+        output.append(line)
+    output, reordered_events = _sort_ass_event_lines(output)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("".join(output), encoding=encoding if encoding != "cp1252" else "utf-8")
+    diagnostic_log(
+        "subtitle.ass.rewrite",
+        source=diagnostic_path_summary(source),
+        target=diagnostic_path_summary(target),
+        encoding=encoding,
+        font=APP_FONT_FAMILY,
+        dialogue_events=dialogue_events,
+        reordered_events=reordered_events,
+        styles=";".join(style_names[:24]) or "none",
+        rewritten=";".join(rewritten_styles) or "none",
+    )
+
+
+def cached_external_subtitle_for_movie(
+    movie: Movie, cache_dir: Path, create: bool = True
+) -> Optional[Path]:
+    source = external_subtitle_source_for_movie(movie)
+    if source is None:
+        diagnostic_log("subtitle.external.cache.no_source", movie=movie.title, create=create)
+        return None
+    if source.suffix.casefold() not in {".ass", ".ssa"}:
+        diagnostic_log(
+            "subtitle.external.cache.direct",
+            movie=movie.title,
+            source=diagnostic_path_summary(source),
+            reason="not_ass_ssa",
+        )
+        return source
+    try:
+        stat = source.stat()
+        identity = f"external|{SUBTITLE_STYLE_CACHE_VERSION}|{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{APP_FONT_FAMILY}"
+    except OSError as error:
+        diagnostic_log("subtitle.external.cache.stat_error", movie=movie.title, source=str(source), error=repr(error))
+        return None
+    digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
+    target = cache_dir / f"{digest}{source.suffix.casefold()}"
+    if target.is_file():
+        ensure_ass_cache_normalized(target)
+        diagnostic_log(
+            "subtitle.external.cache.hit",
+            movie=movie.title,
+            source=diagnostic_path_summary(source),
+            target=diagnostic_path_summary(target),
+            digest=digest,
+        )
+        return target
+    if not create:
+        diagnostic_log(
+            "subtitle.external.cache.miss_no_create",
+            movie=movie.title,
+            source=diagnostic_path_summary(source),
+            target=str(target),
+            digest=digest,
+        )
+        return None
+    try:
+        diagnostic_log(
+            "subtitle.external.cache.create",
+            movie=movie.title,
+            source=diagnostic_path_summary(source),
+            target=str(target),
+            digest=digest,
+        )
+        rewrite_ass_dialogue_styles(source, target)
+        return target
+    except OSError as error:
+        diagnostic_log("subtitle.cache.error", source=str(source), error=repr(error))
+        return source
+
+
+def subtitle_track_label_from_stream(stream: dict, fallback: str) -> str:
+    tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+    title = safe_description(str(tags.get("title", ""))).strip()
+    lang = safe_description(str(tags.get("language", ""))).strip().upper()
+    codec = safe_description(str(stream.get("codec_name", ""))).strip().upper()
+    parts = [title, lang, codec]
+    label = " - ".join(part for part in parts if part and part != "UNKNOWN")
+    return label or fallback
+
+
+def probe_subtitle_streams(path: Path, ffprobe: Optional[str]) -> list[dict]:
+    if not ffprobe:
+        diagnostic_log("subtitle.probe.no_ffprobe", video=str(path))
+        return []
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "s",
+        "-show_entries",
+        "stream=index,codec_name:stream_tags=title,language",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=25,
+            **process_options(),
+        )
+        data = json.loads(result.stdout or "{}")
+        streams = [stream for stream in (data.get("streams") or []) if isinstance(stream, dict)]
+        diagnostic_log(
+            "subtitle.probe.result",
+            video=str(path),
+            returncode=result.returncode,
+            stream_count=len(streams),
+            streams=diagnostic_tracks_summary(streams),
+            stderr=(result.stderr or "").strip()[:500],
+        )
+        return streams
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, json.JSONDecodeError) as error:
+        diagnostic_log("subtitle.probe.error", video=str(path), error=repr(error))
+        return []
+
+
+def cached_embedded_subtitles_for_movie(
+    movie: Movie,
+    cache_dir: Path,
+    ffprobe: Optional[str],
+    ffmpeg: Optional[str],
+    create: bool = True,
+) -> list[tuple[Path, str, str]]:
+    if not ffmpeg or not ffprobe:
+        diagnostic_log(
+            "subtitle.embedded.tools_missing",
+            movie=movie.title,
+            ffprobe=bool(ffprobe),
+            ffmpeg=bool(ffmpeg),
+            create=create,
+        )
+        return []
+    video = Path(movie.path)
+    try:
+        stat = video.stat()
+    except OSError as error:
+        diagnostic_log("subtitle.embedded.video_stat_error", movie=movie.title, video=str(video), error=repr(error))
+        return []
+    tracks: list[tuple[Path, str, str]] = []
+    streams = probe_subtitle_streams(video, ffprobe)
+    diagnostic_log(
+        "subtitle.embedded.scan",
+        movie=movie.title,
+        video=str(video),
+        create=create,
+        stream_count=len(streams),
+    )
+    for stream in streams:
+        codec = safe_description(str(stream.get("codec_name", ""))).casefold()
+        extension = SUBTITLE_CODEC_EXTENSIONS.get(codec)
+        if not extension:
+            diagnostic_log(
+                "subtitle.embedded.unsupported_codec",
+                movie=movie.title,
+                stream=stream.get("index"),
+                codec=codec,
+            )
+            continue
+        try:
+            stream_index = int(stream.get("index"))
+        except (TypeError, ValueError):
+            diagnostic_log("subtitle.embedded.bad_stream_index", movie=movie.title, stream=stream)
+            continue
+        label = subtitle_track_label_from_stream(stream, f"Subtitle {len(tracks) + 1}")
+        language = safe_description(str((stream.get("tags") or {}).get("language", ""))).strip()
+        identity = (
+            f"embedded|{SUBTITLE_STYLE_CACHE_VERSION}|{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|"
+            f"{stream_index}|{codec}|{APP_FONT_FAMILY}"
+        )
+        digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
+        raw_target = cache_dir / f"{digest}.raw{extension}"
+        final_target = cache_dir / f"{digest}{extension}"
+        if final_target.is_file():
+            ensure_ass_cache_normalized(final_target)
+            diagnostic_log(
+                "subtitle.embedded.cache.hit",
+                movie=movie.title,
+                stream=stream_index,
+                codec=codec,
+                label=label,
+                language=language,
+                target=diagnostic_path_summary(final_target),
+                digest=digest,
+            )
+        else:
+            if not create:
+                diagnostic_log(
+                    "subtitle.embedded.cache.miss_no_create",
+                    movie=movie.title,
+                    stream=stream_index,
+                    codec=codec,
+                    label=label,
+                    target=str(final_target),
+                    digest=digest,
+                )
+                continue
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            command = [
+                ffmpeg,
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(video),
+                "-map",
+                f"0:{stream_index}",
+                "-c:s",
+                "copy",
+                str(raw_target),
+            ]
+            try:
+                diagnostic_log(
+                    "subtitle.embedded.extract.start",
+                    movie=movie.title,
+                    stream=stream_index,
+                    codec=codec,
+                    label=label,
+                    raw=str(raw_target),
+                    final=str(final_target),
+                )
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=45,
+                    **process_options(),
+                )
+                if result.returncode != 0 or not raw_target.is_file():
+                    diagnostic_log(
+                        "subtitle.embedded.extract.failed",
+                        video=str(video),
+                        stream=stream_index,
+                        error=(result.stderr or "").strip()[:500],
+                    )
+                    continue
+                if extension in {".ass", ".ssa"}:
+                    rewrite_ass_dialogue_styles(raw_target, final_target)
+                else:
+                    raw_target.replace(final_target)
+                diagnostic_log(
+                    "subtitle.embedded.extract.done",
+                    movie=movie.title,
+                    stream=stream_index,
+                    target=diagnostic_path_summary(final_target),
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                diagnostic_log(
+                    "subtitle.embedded.extract.error",
+                    video=str(video),
+                    stream=stream_index,
+                    error=repr(error),
+                )
+                continue
+            finally:
+                if raw_target.is_file() and raw_target != final_target:
+                    try:
+                        raw_target.unlink()
+                    except OSError:
+                        pass
+        if final_target.is_file():
+            tracks.append((final_target, label, language))
+    diagnostic_log(
+        "subtitle.embedded.scan.done",
+        movie=movie.title,
+        create=create,
+        track_count=len(tracks),
+        tracks="; ".join(f"{label}|{language}|{path.name}" for path, label, language in tracks),
+    )
+    return tracks
+
+
+def cached_subtitle_tracks_for_movie(
+    movie: Movie,
+    cache_dir: Path,
+    ffprobe: Optional[str],
+    ffmpeg: Optional[str],
+    create: bool = False,
+) -> list[tuple[str, str, str, str]]:
+    diagnostic_log(
+        "subtitle.cache.tracks.start",
+        movie=movie.title,
+        video=str(movie.path),
+        cache_dir=str(cache_dir),
+        create=create,
+    )
+    tracks: list[tuple[str, str, str, str]] = []
+    external_subtitle = cached_external_subtitle_for_movie(movie, cache_dir, create=create)
+    if external_subtitle is not None:
+        tracks.append((str(external_subtitle), "English", "eng", "external"))
+    for subtitle_path, label, language in cached_embedded_subtitles_for_movie(
+        movie, cache_dir, ffprobe, ffmpeg, create=create
+    ):
+        tracks.append((str(subtitle_path), label, language, "embedded"))
+    diagnostic_log(
+        "subtitle.cache.tracks.done",
+        movie=movie.title,
+        create=create,
+        count=len(tracks),
+        tracks="; ".join(
+            f"{source}|{label}|{language}|{diagnostic_path_summary(path)}"
+            for path, label, language, source in tracks
+        ) or "none",
+    )
+    return tracks
 
 
 class MpvVideoSurface(QOpenGLWidget):
@@ -3808,6 +4678,13 @@ class MpvController(QObject):
         self._generation = 0
         self._opened_at = 0.0
         self._has_media = False
+        self._using_cached_embedded_subtitles = False
+        self._last_valid_time_ms = 0
+        self._last_valid_length_ms = 0
+        self._last_subtitle_track_signature = ""
+        self._last_selected_subtitle = "unset"
+        self._last_subtitle_text_state = "unset"
+        self._subtitle_empty_deadlines_logged: set[float] = set()
         self.timer = QTimer(self)
         self.timer.setInterval(250)
         self.timer.timeout.connect(self._poll)
@@ -3828,6 +4705,9 @@ class MpvController(QObject):
                     "audio_display": "no",
                     "keep_open": False,
                 }
+                font_dir = bundled_font_dir()
+                if font_dir.is_dir():
+                    options["sub_fonts_dir"] = str(font_dir)
                 self.player = mpv.MPV(
                     **options,
                 )
@@ -3848,12 +4728,69 @@ class MpvController(QObject):
     def available(self) -> bool:
         return self.player is not None
 
+    def _mpv_property(self, name: str, default=None):
+        if not self.player:
+            return default
+        try:
+            return getattr(self.player, name.replace("-", "_"))
+        except Exception:
+            try:
+                return self.player.command("get_property", name)
+            except Exception:
+                return default
+
+    def _log_subtitle_state(self, event: str, **fields) -> None:
+        if not self.player:
+            diagnostic_log(event, player="none", **fields)
+            return
+        try:
+            tracks = self.player.track_list or []
+        except Exception as error:
+            tracks = []
+            fields["track_error"] = repr(error)
+        sub_tracks = [
+            track
+            for track in tracks
+            if isinstance(track, dict) and str(track.get("type", "")).casefold() == "sub"
+        ]
+        sub_text = self._mpv_property("sub-text", "")
+        if sub_text is None:
+            sub_text = ""
+        diagnostic_log(
+            event,
+            generation=self._generation,
+            sid=self._mpv_property("sid", "unknown"),
+            secondary_sid=self._mpv_property("secondary-sid", "unknown"),
+            sub_visibility=self._mpv_property("sub-visibility", "unknown"),
+            sub_pos=self._mpv_property("sub-pos", "unknown"),
+            current_ms=self.time(),
+            length_ms=self.length(),
+            paused=self._mpv_property("pause", "unknown"),
+            idle=self._mpv_property("core-idle", "unknown"),
+            sub_track_count=len(sub_tracks),
+            sub_tracks=diagnostic_tracks_summary(sub_tracks),
+            sub_text_empty=not bool(str(sub_text).strip()),
+            sub_text_preview=str(sub_text).strip()[:120],
+            **fields,
+        )
+
+    def _schedule_subtitle_state_logs(self, generation: int, prefix: str) -> None:
+        for delay in (40, 120, 260, 600, 1200, 2500, 5000):
+            QTimer.singleShot(
+                delay,
+                lambda active=generation, marker=delay: self._run_if_current(
+                    active,
+                    lambda: self._log_subtitle_state(f"{prefix}.{marker}ms"),
+                ),
+            )
+
     def open(
         self,
         path: str,
         start_ms: int = 0,
         volume: int = 80,
         autoplay: bool = True,
+        subtitle_tracks: Optional[list[tuple[str, str, str, str]]] = None,
     ) -> bool:
         if not self.available:
             diagnostic_log("mpv.open.unavailable", path=path)
@@ -3865,6 +4802,16 @@ class MpvController(QObject):
             self._opened_at = time.monotonic()
             self._has_media = True
             self._ended_emitted = False
+            self._last_valid_time_ms = 0
+            self._last_valid_length_ms = 0
+            self._last_subtitle_track_signature = ""
+            self._last_selected_subtitle = "unset"
+            self._last_subtitle_text_state = "unset"
+            self._subtitle_empty_deadlines_logged.clear()
+            managed_subtitles = list(subtitle_tracks or [])
+            self._using_cached_embedded_subtitles = any(
+                len(track) >= 4 and track[3] == "embedded" for track in managed_subtitles
+            )
             diagnostic_log(
                 "mpv.open",
                 generation=generation,
@@ -3872,19 +4819,39 @@ class MpvController(QObject):
                 start_ms=start_ms,
                 volume=volume,
                 autoplay=autoplay,
+                subtitle_tracks=len(managed_subtitles),
+                subtitle_track_details="; ".join(
+                    f"{source}|{title}|{language}|{diagnostic_path_summary(subtitle_path)}"
+                    for subtitle_path, title, language, source in managed_subtitles
+                ) or "none",
+                cached_embedded=self._using_cached_embedded_subtitles,
                 surface=widget_snapshot(self.surface),
             )
+            defer_autoplay_for_subtitles = bool(autoplay and managed_subtitles)
             self.player.volume = max(0, min(100, int(volume)))
             self.player.mute = False
-            self.player.pause = not autoplay
+            self.player.pause = True if defer_autoplay_for_subtitles else not autoplay
             self.player.command("loadfile", str(path), "replace")
-            self.player.pause = not autoplay
+            self.player.pause = True if defer_autoplay_for_subtitles else not autoplay
+            self._schedule_subtitle_state_logs(generation, "mpv.subtitle.state.after_open")
+            if managed_subtitles:
+                QTimer.singleShot(
+                    35,
+                    lambda tracks=managed_subtitles, active=generation, start=start_ms, release=defer_autoplay_for_subtitles: self._run_if_current(
+                        active,
+                        lambda: self.add_managed_subtitles(
+                            tracks,
+                            start_after=release,
+                            start_ms=start,
+                        ),
+                    ),
+                )
             self.fit_video()
             QTimer.singleShot(
                 120,
                 lambda: self._run_if_current(generation, self.fit_video),
             )
-            if start_ms > 0:
+            if start_ms > 0 and not managed_subtitles:
                 QTimer.singleShot(
                     250,
                     lambda: self._run_if_current(
@@ -3930,6 +4897,142 @@ class MpvController(QObject):
     def _run_if_current(self, generation: int, action) -> None:
         if generation == self._generation and self.player is not None:
             action()
+
+    def add_managed_subtitles(
+        self,
+        tracks: list[tuple[str, str, str, str]],
+        start_after: bool = False,
+        start_ms: int = 0,
+    ) -> None:
+        if not self.player:
+            return
+        diagnostic_log(
+            "mpv.subtitle.managed_add.start",
+            generation=self._generation,
+            count=len(tracks),
+            start_after=start_after,
+            start_ms=start_ms,
+            tracks="; ".join(
+                f"{source}|{title}|{language}|{diagnostic_path_summary(subtitle_path)}"
+                for subtitle_path, title, language, source in tracks
+            ) or "none",
+        )
+        first_added = True
+        for subtitle_path, title, language, source_kind in tracks:
+            if not subtitle_path:
+                diagnostic_log("mpv.subtitle.managed_add.skip_empty", generation=self._generation)
+                continue
+            diagnostic_log(
+                "mpv.subtitle.managed_add.before",
+                generation=self._generation,
+                path=diagnostic_path_summary(subtitle_path),
+                title=title,
+                language=language,
+                source=source_kind,
+            )
+            flag = "select" if first_added else "auto"
+            try:
+                self.player.command(
+                    "sub-add",
+                    str(subtitle_path),
+                    flag,
+                    title or "English",
+                    language or "eng",
+                )
+                first_added = False
+                diagnostic_log(
+                    "mpv.subtitle.managed_add",
+                    path=subtitle_path,
+                    title=title,
+                    language=language,
+                    source=source_kind,
+                    flag=flag,
+                )
+            except Exception as error:
+                diagnostic_log(
+                    "mpv.subtitle.managed_add.error",
+                    path=subtitle_path,
+                    title=title,
+                    error=repr(error),
+                )
+        tracks = self.subtitle_tracks()
+        self._log_subtitle_state("mpv.subtitle.managed_add.after", listed_tracks=len(tracks))
+        if tracks:
+            self.select_subtitle(tracks[0][0])
+            diagnostic_log(
+                "mpv.subtitle.managed_selected",
+                track_id=tracks[0][0],
+                label=tracks[0][1],
+            )
+        target_ms = max(0, int(start_ms))
+        if start_after:
+            self.set_paused(False)
+            if target_ms > 0:
+                generation = self._generation
+                QTimer.singleShot(
+                    80,
+                    lambda active=generation, target=target_ms, total=len(tracks): self._run_if_current(
+                        active,
+                        lambda: self._seek_after_subtitles_ready(active, target, total, 0),
+                    ),
+                )
+            else:
+                self._log_subtitle_state(
+                    "mpv.subtitle.managed_add.start_at_zero", selected_tracks=len(tracks)
+                )
+        else:
+            self.set_time(target_ms)
+            self._log_subtitle_state("mpv.subtitle.managed_add.after_seek", selected_tracks=len(tracks))
+
+    def _seek_after_subtitles_ready(
+        self, generation: int, target_ms: int, selected_tracks: int, attempt: int
+    ) -> None:
+        if generation != self._generation or not self.player:
+            return
+        state = self.state() or {}
+        idle = bool(state.get("idle"))
+        if idle and attempt < 12:
+            diagnostic_log(
+                "mpv.subtitle.deferred_seek.wait",
+                generation=generation,
+                attempt=attempt,
+                target_ms=target_ms,
+                current_ms=self.time(),
+                state=state,
+            )
+            QTimer.singleShot(
+                80,
+                lambda active=generation, target=target_ms, total=selected_tracks, next_attempt=attempt + 1: self._run_if_current(
+                    active,
+                    lambda: self._seek_after_subtitles_ready(
+                        active, target, total, next_attempt
+                    ),
+                ),
+            )
+            return
+        seek_ms = max(0, target_ms - SUBTITLE_RESUME_PREROLL_MS) if target_ms > 0 else 0
+        diagnostic_log(
+            "mpv.subtitle.deferred_seek.apply",
+            generation=generation,
+            attempt=attempt,
+            target_ms=target_ms,
+            seek_ms=seek_ms,
+            preroll_ms=target_ms - seek_ms,
+            current_ms=self.time(),
+            state=state,
+        )
+        self.set_time(seek_ms)
+        self._log_subtitle_state(
+            "mpv.subtitle.managed_add.after_deferred_seek",
+            selected_tracks=selected_tracks,
+        )
+        QTimer.singleShot(
+            160,
+            lambda active=generation: self._run_if_current(
+                active,
+                lambda: self._log_subtitle_state("mpv.subtitle.state.after_deferred_seek.160ms"),
+            ),
+        )
 
     def state(self):
         if not self.player:
@@ -3996,9 +5099,12 @@ class MpvController(QObject):
             except Exception:
                 pass
         self._has_media = False
+        self._using_cached_embedded_subtitles = False
         self._opened_at = 0.0
         self._last_playing = False
         self._ended_emitted = False
+        self._last_valid_time_ms = 0
+        self._last_valid_length_ms = 0
 
     def quiet_for_close(self) -> None:
         diagnostic_log("mpv.quiet_for_close")
@@ -4076,12 +5182,20 @@ class MpvController(QObject):
             self.player.speed = max(0.25, min(4.0, float(rate)))
 
     def _track_description(self, track: dict) -> str:
+        title = safe_description(str(track.get("title", ""))).strip()
+        is_external = bool(
+            track.get("external")
+            or track.get("external-filename")
+            or track.get("external_filename")
+        )
+        if is_external and title:
+            return title
         parts = [
-            safe_description(str(track.get("title", ""))),
+            title,
             safe_description(str(track.get("lang", ""))).upper(),
             safe_description(str(track.get("codec", ""))).upper(),
         ]
-        label = " Â· ".join(part for part in parts if part and part != "UNKNOWN")
+        label = " - ".join(part for part in parts if part and part != "UNKNOWN")
         return label or f"Track {track.get('id', '')}".strip()
 
     def _tracks_of_type(self, track_type: str) -> list[dict]:
@@ -4105,9 +5219,20 @@ class MpvController(QObject):
         ]
 
     def subtitle_tracks(self) -> list[tuple[int, str]]:
+        tracks = self._tracks_of_type("sub")
+        if self._using_cached_embedded_subtitles:
+            tracks = [
+                track
+                for track in tracks
+                if bool(
+                    track.get("external")
+                    or track.get("external-filename")
+                    or track.get("external_filename")
+                )
+            ]
         return [
             (int(track.get("id")), self._track_description(track))
-            for track in self._tracks_of_type("sub")
+            for track in tracks
         ]
 
     def selected_audio(self) -> int:
@@ -4134,13 +5259,112 @@ class MpvController(QObject):
 
     def select_subtitle(self, track_id: int) -> None:
         if self.player:
-            self.player.sid = "no" if int(track_id) == -1 else int(track_id)
+            before = self._mpv_property("sid", "unknown")
+            requested = "no" if int(track_id) == -1 else int(track_id)
+            try:
+                self.player.sid = requested
+                after = self._mpv_property("sid", "unknown")
+                diagnostic_log(
+                    "mpv.subtitle.select",
+                    generation=self._generation,
+                    requested=requested,
+                    before=before,
+                    after=after,
+                    tracks=diagnostic_tracks_summary(self.player.track_list or []),
+                )
+            except Exception as error:
+                diagnostic_log(
+                    "mpv.subtitle.select.error",
+                    generation=self._generation,
+                    requested=requested,
+                    before=before,
+                    error=repr(error),
+                )
+
+    def _emit_ended_once(self, reason: str, current: int, length: int) -> None:
+        if self._ended_emitted:
+            return
+        diagnostic_log(
+            "mpv.ended",
+            reason=reason,
+            current_ms=current,
+            length_ms=length,
+            last_current_ms=self._last_valid_time_ms,
+            last_length_ms=self._last_valid_length_ms,
+        )
+        self._ended_emitted = True
+        self._has_media = False
+        self.ended.emit()
 
     def _poll(self) -> None:
         if not self.player:
             return
         current = self.time()
         length = self.length()
+        state = self.state()
+        if length > 0:
+            self._last_valid_length_ms = length
+        if current > 0:
+            self._last_valid_time_ms = current
+        try:
+            track_list = self.player.track_list or []
+        except Exception:
+            track_list = []
+        sub_tracks = [
+            track
+            for track in track_list
+            if isinstance(track, dict) and str(track.get("type", "")).casefold() == "sub"
+        ]
+        sub_signature = diagnostic_tracks_summary(sub_tracks)
+        if sub_signature != self._last_subtitle_track_signature:
+            self._last_subtitle_track_signature = sub_signature
+            diagnostic_log(
+                "mpv.subtitle.tracks_changed",
+                generation=self._generation,
+                current_ms=current,
+                length_ms=length,
+                count=len(sub_tracks),
+                tracks=sub_signature or "none",
+            )
+        sid_value = str(self._mpv_property("sid", "unknown"))
+        if sid_value != self._last_selected_subtitle:
+            self._last_selected_subtitle = sid_value
+            diagnostic_log(
+                "mpv.subtitle.sid_changed",
+                generation=self._generation,
+                current_ms=current,
+                length_ms=length,
+                sid=sid_value,
+            )
+        sub_text = str(self._mpv_property("sub-text", "") or "").strip()
+        sub_text_state = "text" if sub_text else "empty"
+        if sub_text_state != self._last_subtitle_text_state:
+            self._last_subtitle_text_state = sub_text_state
+            diagnostic_log(
+                "mpv.subtitle.text_state_changed",
+                generation=self._generation,
+                current_ms=current,
+                length_ms=length,
+                state=sub_text_state,
+                preview=sub_text[:120],
+            )
+        for deadline in (1.0, 3.0, 8.0):
+            if (
+                deadline not in self._subtitle_empty_deadlines_logged
+                and self.opening_age() >= deadline
+                and sid_value not in {"no", "-1", "None", "unknown"}
+                and not sub_text
+            ):
+                self._subtitle_empty_deadlines_logged.add(deadline)
+                diagnostic_log(
+                    "mpv.subtitle.text_still_empty",
+                    generation=self._generation,
+                    age_seconds=deadline,
+                    current_ms=current,
+                    length_ms=length,
+                    sid=sid_value,
+                    sub_tracks=sub_signature or "none",
+                )
         self.position_changed.emit(current, length)
         playing = self.is_playing()
         if playing != self._last_playing:
@@ -4150,17 +5374,26 @@ class MpvController(QObject):
                 playing=playing,
                 current_ms=current,
                 length_ms=length,
-                state=self.state(),
+                state=state,
             )
             self.playing_changed.emit(playing)
         try:
-            if bool(self.player.eof_reached) and not self._ended_emitted:
-                diagnostic_log("mpv.ended", current_ms=current, length_ms=length)
-                self._ended_emitted = True
-                self._has_media = False
-                self.ended.emit()
+            if bool(self.player.eof_reached):
+                self._emit_ended_once("eof_reached", current, length)
+                return
         except Exception:
             pass
+        if (
+            self._has_media
+            and not self._ended_emitted
+            and self.opening_age() > 2.0
+            and current == 0
+            and length == 0
+            and bool(state and state.get("idle"))
+            and self._last_valid_length_ms > 0
+            and self._last_valid_time_ms >= max(0, self._last_valid_length_ms - 2500)
+        ):
+            self._emit_ended_once("idle_after_near_end", current, length)
 
 
 class SeekSlider(QSlider):
@@ -4768,6 +6001,8 @@ class PlayerPage(QWidget):
         super().__init__()
         self.store = store
         self.settings = settings
+        self.ffmpeg = find_binary("ffmpeg")
+        self.ffprobe = find_binary("ffprobe")
         self.movie: Optional[Movie] = None
         self.playlist: list[Movie] = []
         self.playlist_title = ""
@@ -5322,12 +6557,27 @@ class PlayerPage(QWidget):
         self.subtitle_preference_applied = False
         self._sync_video_surface_geometry()
         self.timeline.setRange(0, max(0, movie.duration_ms))
-        start_position = (
-            max(0, int(start_ms))
-            if start_ms is not None
-            else movie.progress_ms if not movie.completed else 0
-        )
+        saved_progress = 0 if movie.completed else max(0, int(movie.progress_ms or 0))
+        start_position = max(0, int(start_ms)) if start_ms is not None else saved_progress
         self.timeline.setValue(start_position)
+        subtitle_tracks = cached_subtitle_tracks_for_movie(
+            movie,
+            self.store.subtitle_cache_dir,
+            self.ffprobe,
+            self.ffmpeg,
+            create=False,
+        )
+        diagnostic_log(
+            "player.subtitle.cached_tracks",
+            title=movie.title,
+            count=len(subtitle_tracks),
+            preference_key=self._subtitle_preference_key(),
+            saved_preference=self._saved_subtitle_preference(),
+            tracks="; ".join(
+                f"{source}|{label}|{language}|{diagnostic_path_summary(path)}"
+                for path, label, language, source in subtitle_tracks
+            ) or "none",
+        )
         set_player_button_icon(self.play_button, "pause" if autoplay else "play")
         self.play_button.setToolTip("Pause (K)" if autoplay else "Play (K)")
         self.playback_started_at = time.monotonic()
@@ -5336,6 +6586,7 @@ class PlayerPage(QWidget):
             start_position,
             int(self.settings.get("volume", 80)),
             autoplay=autoplay,
+            subtitle_tracks=subtitle_tracks,
         )
         if not autoplay:
             QTimer.singleShot(
@@ -5344,7 +6595,8 @@ class PlayerPage(QWidget):
                     token, lambda: self.controller.set_paused(True)
                 ),
             )
-        for delay in (120, 300, 700, 1200):
+        preference_delays = (90, 150, 240, 420, 800, 1300) if subtitle_tracks else (120, 300, 700, 1200)
+        for delay in preference_delays:
             QTimer.singleShot(
                 delay,
                 lambda token=playback_token: self._run_for_playback(
@@ -6469,7 +7721,15 @@ class PlayerPage(QWidget):
                 lambda checked=False: self._choose_subtitle_track(-1, ""),
             )
         ]
-        for track_id, description in self.controller.subtitle_tracks():
+        available_subtitle_tracks = self.controller.subtitle_tracks()
+        diagnostic_log(
+            "player.subtitle.menu_open",
+            movie=self.movie.title if self.movie else "none",
+            current_sid=current_spu,
+            available=len(available_subtitle_tracks),
+            tracks="; ".join(f"{track_id}:{description}" for track_id, description in available_subtitle_tracks) or "none",
+        )
+        for track_id, description in available_subtitle_tracks:
             label = safe_description(description)
             subtitle_items.append(
                 (
@@ -6547,6 +7807,12 @@ class PlayerPage(QWidget):
     def _choose_subtitle_track(
         self, track_id: int, label: str
     ) -> None:
+        diagnostic_log(
+            "player.subtitle.user_choose",
+            movie=self.movie.title if self.movie else "none",
+            track_id=track_id,
+            label=label,
+        )
         self._remember_subtitle_preference(track_id, label)
         self._select_subtitle(track_id)
         self._close_track_panel()
@@ -6665,6 +7931,14 @@ class PlayerPage(QWidget):
             "label": label,
             "track_id": track_id,
         }
+        diagnostic_log(
+            "player.subtitle.preference.saved",
+            movie=self.movie.title if self.movie else "none",
+            key=key,
+            track_id=track_id,
+            label=label,
+            off=track_id == -1,
+        )
         self.subtitle_preference_applied = True
         self.settings_changed.emit()
 
@@ -6678,17 +7952,38 @@ class PlayerPage(QWidget):
 
     def _apply_saved_subtitle_preference(self) -> None:
         if self.subtitle_preference_applied or not self.movie:
+            diagnostic_log(
+                "player.subtitle.preference.skip",
+                reason="already_applied_or_no_movie",
+                applied=self.subtitle_preference_applied,
+                movie=self.movie.title if self.movie else "none",
+            )
             return
         preference = self._saved_subtitle_preference()
         if not preference:
+            diagnostic_log(
+                "player.subtitle.preference.none",
+                movie=self.movie.title if self.movie else "none",
+                key=self._subtitle_preference_key(),
+            )
             return
         if preference.get("off"):
+            diagnostic_log(
+                "player.subtitle.preference.apply_off",
+                movie=self.movie.title if self.movie else "none",
+                preference=preference,
+            )
             self.subtitle_preference_applied = True
             self._select_subtitle(-1)
             return
 
         tracks = self.controller.subtitle_tracks()
         if not tracks:
+            diagnostic_log(
+                "player.subtitle.preference.wait_no_tracks",
+                movie=self.movie.title if self.movie else "none",
+                preference=preference,
+            )
             return
         saved_label = safe_description(str(preference.get("label", ""))).casefold()
         saved_track_id = int(preference.get("track_id", -1) or -1)
@@ -6700,17 +7995,34 @@ class PlayerPage(QWidget):
             ),
             None,
         )
+        match_reason = "label"
         if match is None:
             match = next(
                 (track_id for track_id, _description in tracks if track_id == saved_track_id),
                 None,
             )
+            match_reason = "track_id"
         if match is None:
+            diagnostic_log(
+                "player.subtitle.preference.no_match",
+                movie=self.movie.title if self.movie else "none",
+                preference=preference,
+                tracks="; ".join(f"{track_id}:{description}" for track_id, description in tracks),
+            )
             return
+        diagnostic_log(
+            "player.subtitle.preference.apply",
+            movie=self.movie.title if self.movie else "none",
+            preference=preference,
+            match=match,
+            match_reason=match_reason,
+            tracks="; ".join(f"{track_id}:{description}" for track_id, description in tracks),
+        )
         self.subtitle_preference_applied = True
         self._select_subtitle(match)
 
     def _select_subtitle(self, track_id: int) -> None:
+        before = self.selected_subtitle
         if track_id == -1:
             if self.selected_subtitle != -1:
                 self.last_subtitle_selection = self.selected_subtitle
@@ -6720,6 +8032,14 @@ class PlayerPage(QWidget):
             self.controller.select_subtitle(track_id)
             self.selected_subtitle = track_id
         self.last_subtitle_selection = self.selected_subtitle
+        diagnostic_log(
+            "player.subtitle.selected",
+            movie=self.movie.title if self.movie else "none",
+            requested=track_id,
+            before=before,
+            after=self.selected_subtitle,
+            last=self.last_subtitle_selection,
+        )
         self._queue_overlay_input_restore()
 
 
@@ -6770,6 +8090,9 @@ class DordieWatchWindow(QMainWindow):
         self.scan_task: Optional[LibraryScanTask] = None
         self.preview_task: Optional[PreviewGenerationTask] = None
         self.preview_task_key = ""
+        self.subtitle_cache_task: Optional[SubtitleCacheTask] = None
+        self.subtitle_cache_task_key = ""
+        self.subtitle_cache_token = 0
         self.scan_token = 0
         self.scan_progress_map: dict[str, tuple[int, float, bool]] = {}
         self.scan_seen_paths: set[str] = set()
@@ -7193,6 +8516,11 @@ class DordieWatchWindow(QMainWindow):
         )
         if updated is not None:
             dialog.set_collection(updated)
+            if (
+                self.subtitle_cache_task is not None
+                and self.subtitle_cache_task_key == updated.folder
+            ):
+                dialog.set_subtitle_cache_busy(True, "Caching...")
 
     def scan_folder(self, folder: Path) -> None:
         if not folder.is_dir():
@@ -7207,7 +8535,7 @@ class DordieWatchWindow(QMainWindow):
             for movie in self.movies
         }
         self.scan_seen_paths = set()
-        self.home.set_scanning(f"Scanning {Path(root).name}â€¦")
+        self.home.set_scanning(f"Scanning {Path(root).name}…")
         task = LibraryScanTask(Path(root), self.store, self.movies)
         self.scan_task = task
         task.signals.movie.connect(
@@ -7245,7 +8573,7 @@ class DordieWatchWindow(QMainWindow):
     ) -> None:
         if token != self.scan_token:
             return
-        title = textwrap.shorten(name, width=44, placeholder="â€¦")
+        title = textwrap.shorten(name, width=44, placeholder="…")
         self.home.set_scanning(f"{current} / {total}  {title}", current, total)
 
     def _scan_finished(self, root: str, token: int) -> None:
@@ -7295,13 +8623,16 @@ class DordieWatchWindow(QMainWindow):
             self.settings.get("dordielist_library_url") or ""
         ).strip()
         parsed_url = urllib.parse.urlparse(library_url)
-        media_ids = sorted(
-            {
-                movie.media_id
-                for movie in self.movies
-                if movie.media_id is not None
-            }
-        )
+        media_id_set = {
+            movie.media_id
+            for movie in self.movies
+            if movie.media_id is not None
+        }
+        for collection in build_collections(self.movies, self.roots):
+            folder = collection_filesystem_folder(collection)
+            if folder.is_dir():
+                media_id_set.update(collection_database_ids(folder))
+        media_ids = sorted(media_id for media_id in media_id_set if media_id is not None)
         if (
             parsed_url.scheme.casefold() not in {"http", "https"}
             or not parsed_url.netloc
@@ -7309,7 +8640,7 @@ class DordieWatchWindow(QMainWindow):
         ):
             return
 
-        self.home.set_scanning("Syncing with DordieListâ€¦")
+        self.home.set_scanning("Syncing with DordieList…")
         task = WebsiteLibraryTask(library_url, media_ids, self.store)
         self.website_library_task = task
         task.signals.loaded.connect(self._website_library_loaded)
@@ -7341,7 +8672,7 @@ class DordieWatchWindow(QMainWindow):
         if not self.scan_task:
             self.scan_folder(self.video_folder)
         if not self.scan_task:
-            self.home.set_scanning("Connecting to DordieListâ€¦")
+            self.home.set_scanning("Connecting to DordieList…")
         task = WebsiteMediaTask(manifest_url, self.store)
         self.website_task = task
         task.signals.loaded.connect(self._website_media_loaded)
@@ -7386,20 +8717,27 @@ class DordieWatchWindow(QMainWindow):
             return
 
         media_id = int(payload["id"])
-        folder = Path(collection.folder)
+        display_title = str(payload.get("display_title") or "").strip()
+        folder = collection_filesystem_folder(collection)
         try:
-            if folder.is_dir() and collection_database_id(folder) != media_id:
-                link_collection_to_database_id(folder, media_id)
+            if folder.is_dir():
+                linked_folder = link_collection_to_database_id(folder, media_id, display_title)
+                if linked_folder != folder:
+                    update_collection_paths_after_folder_rename(
+                        collection, folder, linked_folder
+                    )
         except (OSError, ValueError) as error:
             QMessageBox.warning(
                 self,
                 APP_NAME,
-                f"Could not save the database ID in this local folder:\n\n{error}",
+                f"Could not rename the local folder for this DordieList title:\n\n{error}",
             )
             return
 
+        folder_ids = collection_database_ids(collection_filesystem_folder(collection))
+        primary_media_id = folder_ids[0] if folder_ids else media_id
         for movie in collection.movies:
-            movie.media_id = media_id
+            movie.media_id = primary_media_id
         update_movies_from_website(
             collection.movies, [payload], self.store
         )
@@ -7433,20 +8771,19 @@ class DordieWatchWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 APP_NAME,
-                "No unlinked local video folders are available for this database entry.",
+                "No unlinked local video folders are available for this DordieList title.",
             )
             return None
 
-        available.sort(key=lambda item: natural_sort_key(Path(item.folder).name))
+        available.sort(
+            key=lambda item: natural_sort_key(str(collection_filesystem_folder(item)))
+        )
         labels: list[str] = []
         by_label: dict[str, LibraryCollection] = {}
         for collection in available:
-            folder_name = Path(collection.folder).name
-            label = (
-                folder_name
-                if folder_name not in by_label
-                else str(Path(collection.folder))
-            )
+            folder = collection_filesystem_folder(collection)
+            folder_name = folder.name
+            label = folder_name if folder_name not in by_label else str(folder)
             labels.append(label)
             by_label[label] = collection
 
@@ -7454,10 +8791,10 @@ class DordieWatchWindow(QMainWindow):
         display_title = str(payload.get("display_title") or "this title").strip()
         selected, accepted = QInputDialog.getItem(
             self,
-            "Connect DordieList database ID",
+            "Connect DordieList title",
             (
-                f"Database ID {media_id}: {display_title}\n\n"
-                "Choose the local video folder to link:"
+                f"{display_title} [{media_id}]\n\n"
+                "Choose the local video folder to rename and link:"
             ),
             labels,
             0,
@@ -7484,12 +8821,94 @@ class DordieWatchWindow(QMainWindow):
         dialog = SeriesDetailsDialog(collection, self, origin_geometry)
         self.series_dialog = dialog
         dialog.movie_activated.connect(self.play_movie)
+        dialog.subtitle_cache_requested.connect(self.cache_subtitles_for_collection)
+        if self.subtitle_cache_task_key == collection.folder and self.subtitle_cache_task is not None:
+            dialog.set_subtitle_cache_busy(True, "Caching...")
         dialog.finished.connect(
             lambda *_args, active=dialog: self._clear_series_dialog(active)
         )
         dialog.show_centered()
         dialog.raise_()
         self.start_series_preview_generation(collection)
+
+    def _set_home_activity_idle_if_possible(self) -> None:
+        if (
+            not self.scan_task
+            and not self.website_task
+            and not self.website_library_task
+            and not self.subtitle_cache_task
+        ):
+            self.home.set_scanning(None)
+
+    def cache_subtitles_for_collection(self, collection: LibraryCollection) -> None:
+        if not collection.movies:
+            return
+        if self.subtitle_cache_task is not None:
+            dialog = self.series_dialog
+            if dialog is not None and dialog.collection.folder == collection.folder:
+                dialog.set_subtitle_cache_busy(True, "Caching...")
+            return
+        self.subtitle_cache_token += 1
+        token = self.subtitle_cache_token
+        task = SubtitleCacheTask(collection.movies, self.store, collection.folder)
+        self.subtitle_cache_task = task
+        self.subtitle_cache_task_key = collection.folder
+        self.home.set_scanning(f"Caching subtitles for {collection.title}...", 0, len(collection.movies))
+        dialog = self.series_dialog
+        if dialog is not None and dialog.collection.folder == collection.folder:
+            dialog.set_subtitle_cache_busy(True, "Checking...")
+        task.signals.progress.connect(
+            lambda current, total, title, active=token: self._subtitle_cache_progress(
+                active, current, total, title
+            )
+        )
+        task.signals.finished.connect(
+            lambda payload, active=token: self._subtitle_cache_finished(active, payload)
+        )
+        task.signals.failed.connect(
+            lambda message, active=token: self._subtitle_cache_failed(active, message)
+        )
+        QThreadPool.globalInstance().start(task.runnable)
+
+    def _subtitle_cache_progress(
+        self, token: int, current: int, total: int, title: str
+    ) -> None:
+        if token != self.subtitle_cache_token:
+            return
+        self.home.set_scanning(f"Caching subtitles {current} / {total}  {title}", current, total)
+        dialog = self.series_dialog
+        if dialog is not None and dialog.collection.folder == self.subtitle_cache_task_key:
+            dialog.set_subtitle_cache_busy(True, f"Caching {current}/{total}")
+
+    def _subtitle_cache_finished(self, token: int, payload: dict) -> None:
+        if token != self.subtitle_cache_token:
+            return
+        self.subtitle_cache_task = None
+        key = str(payload.get("key") or "")
+        tracks = int(payload.get("tracks") or 0)
+        videos = int(payload.get("videos") or 0)
+        created = int(payload.get("created") or 0)
+        if tracks <= 0:
+            message = "No Subtitles"
+        elif created <= 0:
+            message = "Cache Ready"
+        else:
+            message = "Cache Ready"
+        dialog = self.series_dialog
+        if dialog is not None and dialog.collection.folder == key:
+            dialog.set_subtitle_cache_busy(False, message)
+        self.subtitle_cache_task_key = ""
+        self._set_home_activity_idle_if_possible()
+
+    def _subtitle_cache_failed(self, token: int, message: str) -> None:
+        if token != self.subtitle_cache_token:
+            return
+        self.subtitle_cache_task = None
+        dialog = self.series_dialog
+        if dialog is not None and dialog.collection.folder == self.subtitle_cache_task_key:
+            dialog.set_subtitle_cache_busy(False, "Cache Failed")
+        self.subtitle_cache_task_key = ""
+        self._set_home_activity_idle_if_possible()
 
     def start_series_preview_generation(self, collection: LibraryCollection) -> None:
         if not collection.movies:
@@ -7644,7 +9063,7 @@ class DordieWatchWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, "This video is no longer available.")
             return
         if self.series_dialog is not None:
-            self._play_movie_from_series_dialog(movie, self.series_dialog)
+            self._play_movie_from_series_dialog(movie, self.series_dialog, start_ms=None)
             return
         current_page = self.pages.currentWidget()
         self.player_return_page = (
@@ -7665,23 +9084,23 @@ class DordieWatchWindow(QMainWindow):
         self.player_launch_overlay = overlay
         overlay.finished.connect(self._finish_player_launch_transition)
         overlay.black_reached.connect(
-            lambda selected=Movie.from_dict(movie.to_dict()), active=overlay: (
-                self._start_player_after_launch_transition(selected, active)
+            lambda selected=Movie.from_dict(movie.to_dict()), active=overlay, requested_start=None: (
+                self._start_player_after_launch_transition(selected, active, requested_start)
             )
         )
         overlay.start()
         self.home.hero.stop_preview()
 
     def _play_movie_from_series_dialog(
-        self, movie: Movie, dialog: SeriesDetailsDialog
+        self, movie: Movie, dialog: SeriesDetailsDialog, start_ms: Optional[int] = 0
     ) -> None:
         snapshot = self.grab()
         overlay = PlayerLaunchTransitionOverlay(snapshot, self)
         self.player_launch_overlay = overlay
         overlay.finished.connect(self._finish_player_launch_transition)
         overlay.black_reached.connect(
-            lambda selected=Movie.from_dict(movie.to_dict()), active=overlay: (
-                self._start_player_after_launch_transition(selected, active)
+            lambda selected=Movie.from_dict(movie.to_dict()), active=overlay, requested_start=start_ms: (
+                self._start_player_after_launch_transition(selected, active, requested_start)
             )
         )
         overlay.start()
@@ -7716,7 +9135,7 @@ class DordieWatchWindow(QMainWindow):
         self.player_return_page = self.home
 
     def _start_player_after_launch_transition(
-        self, movie: Movie, overlay: PlayerLaunchTransitionOverlay
+        self, movie: Movie, overlay: PlayerLaunchTransitionOverlay, start_ms: Optional[int] = None
     ) -> None:
         library_movie = self._library_movie_for_path(movie.path)
         if library_movie is not None:
@@ -7729,7 +9148,14 @@ class DordieWatchWindow(QMainWindow):
         )
         self._prepare_player_playlist(movie)
         self.pages.setCurrentWidget(self.player)
-        self.player.play_movie(movie)
+        diagnostic_log(
+            "window.player_launch.start",
+            title=movie.title,
+            path=movie.path,
+            requested_start_ms=start_ms,
+            saved_progress_ms=movie.progress_ms,
+        )
+        self.player.play_movie(movie, start_ms=start_ms)
         QTimer.singleShot(180, overlay.finish)
 
     def _finish_player_launch_transition(self) -> None:
@@ -7764,7 +9190,7 @@ class DordieWatchWindow(QMainWindow):
 
     def save_progress(self, movie: Movie, progress: int, completed: bool) -> None:
         target_movie = self._library_movie_for_path(movie.path) or movie
-        target_movie.progress_ms = 0 if completed else max(0, progress)
+        target_movie.progress_ms = 0 if completed else max(0, int(progress))
         target_movie.completed = completed
         target_movie.last_played = time.time()
         if target_movie is not movie:
@@ -7818,6 +9244,8 @@ class DordieWatchWindow(QMainWindow):
             self.scan_task.cancel()
         if self.preview_task:
             self.preview_task.cancel()
+        if self.subtitle_cache_task:
+            self.subtitle_cache_task.cancel()
         if self.pages.currentWidget() is self.player and self.player.movie:
             self.close_after_player = True
             event.ignore()
@@ -7921,6 +9349,24 @@ QMainWindow, QStackedWidget, #homeContent, #homeScroll,
 #seriesPlay:hover {
     background: #dcdcdc;
 }
+#seriesCacheButton {
+    background: rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.42);
+    border-radius: 4px;
+    padding: 9px 14px;
+    font-size: 14px;
+    font-weight: 800;
+}
+#seriesCacheButton:hover {
+    background: rgba(255, 255, 255, 0.18);
+}
+#seriesCacheButton:disabled {
+    color: #bdbdbd;
+    border-color: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.08);
+}
+
 #seriesEpisodesHeading {
     color: #ffffff;
     font-size: 24px;
@@ -8427,6 +9873,55 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
