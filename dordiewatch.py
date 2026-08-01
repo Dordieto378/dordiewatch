@@ -3268,8 +3268,8 @@ class SeriesDetailsDialog(QWidget):
         button = self.cache_button
         if button is None:
             return
-        button.setEnabled(not self.subtitle_cache_busy and not self.subtitle_cache_ready)
-        button.setText(self.subtitle_cache_text or ("Cache Saved" if self.subtitle_cache_ready else "Cache Subtitles"))
+        button.setEnabled(not self.subtitle_cache_busy)
+        button.setText(self.subtitle_cache_text or ("Recache" if self.subtitle_cache_ready else "Cache Subtitles"))
 
     def _build_movie_cache_row(self) -> QWidget:
         row_widget = QWidget()
@@ -3573,13 +3573,13 @@ class SeriesDetailsDialog(QWidget):
     def set_subtitle_cache_ready(self, ready: bool, text: str = "") -> None:
         self.subtitle_cache_busy = False
         self.subtitle_cache_ready = ready
-        self.subtitle_cache_text = text or ("Cache Saved" if ready else "Cache Subtitles")
+        self.subtitle_cache_text = text or ("Recache" if ready else "Cache Subtitles")
         self._sync_cache_button()
 
     def set_subtitle_cache_status(self, text: str) -> None:
         self.subtitle_cache_busy = False
-        self.subtitle_cache_ready = text.casefold() in {"cache ready", "cache saved", "saved"}
-        self.subtitle_cache_text = text or ("Cache Saved" if self.subtitle_cache_ready else "Cache Subtitles")
+        self.subtitle_cache_ready = text.casefold() in {"cache ready", "cache saved", "saved", "recache"}
+        self.subtitle_cache_text = text or ("Recache" if self.subtitle_cache_ready else "Cache Subtitles")
         self._sync_cache_button()
 
     def _play_movie(self, movie: Movie) -> None:
@@ -3705,8 +3705,8 @@ SUBTITLE_CODEC_EXTENSIONS = {
     "srt": ".srt",
 }
 SUBTITLE_FOLDER_NAMES = {"subs", "sub", "subtitle", "subtitles"}
-DIALOGUE_STYLE_NAMES = {"main", "default"}
-SUBTITLE_STYLE_CACHE_VERSION = "netflix-sans-bold-dialogue-v2"
+DIALOGUE_STYLE_NAME_PREFIXES = ("main", "default")
+SUBTITLE_STYLE_CACHE_VERSION = "netflix-sans-bold-dialogue-v5"
 SUBTITLE_RESUME_PREROLL_MS = 1500
 
 
@@ -3815,6 +3815,47 @@ def _replace_ass_field(value: str, replacement: str) -> str:
     return f"{leading}{replacement}{trailing}"
 
 
+def _normalized_ass_style_name(value: str) -> str:
+    return value.strip().casefold()
+
+
+def _normalized_ass_font_name(value: str) -> str:
+    return value.strip().casefold()
+
+
+def _ass_style_name_is_dialogue(value: str) -> bool:
+    style_name = _normalized_ass_style_name(value)
+    return any(style_name.startswith(prefix) for prefix in DIALOGUE_STYLE_NAME_PREFIXES)
+
+
+def _ass_dialogue_style_fonts(lines: list[str]) -> set[str]:
+    in_styles = False
+    format_fields: list[str] = []
+    fonts: set[str] = set()
+    for line in lines:
+        stripped = line.strip()
+        lower = stripped.casefold()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_styles = lower in {"[v4+ styles]", "[v4 styles]"}
+            continue
+        if in_styles and lower.startswith("format:"):
+            format_fields = [field.strip().casefold() for field in line.split(":", 1)[1].split(",")]
+            continue
+        if in_styles and lower.startswith("style:") and format_fields:
+            payload = line.split(":", 1)[1].rstrip("\r\n")
+            parts = payload.split(",", max(0, len(format_fields) - 1))
+            try:
+                name_index = format_fields.index("name")
+                font_index = format_fields.index("fontname")
+            except ValueError:
+                continue
+            if len(parts) > max(name_index, font_index) and _ass_style_name_is_dialogue(parts[name_index]):
+                font_name = _normalized_ass_font_name(parts[font_index])
+                if font_name:
+                    fonts.add(font_name)
+    return fonts
+
+
 ASS_EVENT_SORT_MARKER = "; DordieWatch: ASS events sorted chronologically"
 
 
@@ -3913,6 +3954,7 @@ def ensure_ass_cache_normalized(path: Path) -> None:
 def rewrite_ass_dialogue_styles(source: Path, target: Path) -> None:
     text, encoding = _read_subtitle_text(source)
     lines = text.splitlines(keepends=True)
+    dialogue_fonts = _ass_dialogue_style_fonts(lines)
     output: list[str] = []
     in_styles = False
     format_fields: list[str] = []
@@ -3953,8 +3995,9 @@ def rewrite_ass_dialogue_styles(source: Path, target: Path) -> None:
             if len(parts) > required_length:
                 style_name_raw = parts[name_index].strip()
                 style_name = style_name_raw.casefold()
+                style_font = _normalized_ass_font_name(parts[font_index])
                 style_names.append(style_name_raw)
-                if style_name in DIALOGUE_STYLE_NAMES:
+                if _ass_style_name_is_dialogue(style_name_raw) or (style_font and style_font in dialogue_fonts):
                     parts[font_index] = _replace_ass_field(parts[font_index], APP_FONT_FAMILY)
                     if bold_index >= 0:
                         parts[bold_index] = _replace_ass_field(parts[bold_index], "-1")
@@ -3974,6 +4017,7 @@ def rewrite_ass_dialogue_styles(source: Path, target: Path) -> None:
         reordered_events=reordered_events,
         styles=";".join(style_names[:24]) or "none",
         rewritten=";".join(rewritten_styles) or "none",
+        dialogue_fonts=";".join(sorted(dialogue_fonts)) or "none",
     )
 
 
@@ -4012,13 +4056,14 @@ def cached_external_subtitle_for_movie(
         return target
     if not create:
         diagnostic_log(
-            "subtitle.external.cache.miss_no_create",
+            "subtitle.external.cache.miss_use_source",
             movie=movie.title,
             source=diagnostic_path_summary(source),
             target=str(target),
             digest=digest,
+            reason="styled_cache_missing",
         )
-        return None
+        return source
     try:
         diagnostic_log(
             "subtitle.external.cache.create",
@@ -8968,7 +9013,7 @@ class DordieWatchWindow(QMainWindow):
         if self.subtitle_cache_task_key == collection.folder and self.subtitle_cache_task is not None:
             dialog.set_subtitle_cache_busy(True, "Caching...")
         elif self._subtitle_cache_is_ready(collection.folder):
-            dialog.set_subtitle_cache_ready(True, "Cache Saved")
+            dialog.set_subtitle_cache_ready(True, "Recache")
         else:
             dialog.set_subtitle_cache_ready(False, "Cache Subtitles")
         dialog.finished.connect(
@@ -9036,16 +9081,12 @@ class DordieWatchWindow(QMainWindow):
             self._set_subtitle_cache_ready_flag(key, False)
         dialog = self.series_dialog
         if dialog is not None and dialog.collection.folder == key:
-            dialog.set_subtitle_cache_ready(is_ready, "Cache Saved" if is_ready else "Cache Subtitles")
+            dialog.set_subtitle_cache_ready(is_ready, "Recache" if is_ready else "Cache Subtitles")
 
     def cache_subtitles_for_collection(self, collection: LibraryCollection) -> None:
         if not collection.movies:
             return
-        if self._subtitle_cache_is_ready(collection.folder):
-            dialog = self.series_dialog
-            if dialog is not None and dialog.collection.folder == collection.folder:
-                dialog.set_subtitle_cache_ready(True, "Cache Saved")
-            return
+
         if self.subtitle_cache_task is not None:
             dialog = self.series_dialog
             if dialog is not None and dialog.collection.folder == collection.folder:
@@ -9095,7 +9136,7 @@ class DordieWatchWindow(QMainWindow):
             message = "No Subtitles"
             self._set_subtitle_cache_ready_flag(key, False)
         else:
-            message = "Cache Saved"
+            message = "Recache"
             self._set_subtitle_cache_ready_flag(key, True)
         dialog = self.series_dialog
         if dialog is not None and dialog.collection.folder == key:
