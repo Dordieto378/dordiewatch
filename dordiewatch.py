@@ -30,6 +30,7 @@ if VENDOR_ROOT.is_dir():
     sys.path.insert(0, str(VENDOR_ROOT))
 
 APP_FONT_FAMILY = "Netflix Sans"
+BRAND_FONT_FAMILY = "Moco"
 
 
 def bundle_root() -> Path:
@@ -207,7 +208,24 @@ from PySide6.QtSvg import QSvgRenderer
 
 
 def load_app_font(app: QApplication) -> str:
-    global APP_FONT_FAMILY
+    global APP_FONT_FAMILY, BRAND_FONT_FAMILY
+    brand_candidates = [
+        bundle_root() / "font" / "Moco.ttf",
+        bundle_root() / "font" / "moco.ttf",
+        SOURCE_ROOT / "font" / "Moco.ttf",
+        SOURCE_ROOT / "font" / "moco.ttf",
+    ]
+    for font_path in brand_candidates:
+        if not font_path.is_file():
+            continue
+        font_id = QFontDatabase.addApplicationFont(str(font_path))
+        if font_id < 0:
+            continue
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if families:
+            BRAND_FONT_FAMILY = families[0]
+            break
+
     candidates = [
         bundle_root() / "font" / "NetflixSans-Bold.otf",
         SOURCE_ROOT / "font" / "NetflixSans-Bold.otf",
@@ -225,8 +243,6 @@ def load_app_font(app: QApplication) -> str:
             return APP_FONT_FAMILY
     app.setFont(QFont(APP_FONT_FAMILY, 10))
     return APP_FONT_FAMILY
-
-
 APP_NAME = "DordieWatch"
 APP_VERSION = 4
 EPISODE_PREVIEW_CACHE_VERSION = "episode-preview-v2"
@@ -429,6 +445,18 @@ def format_episode_runtime(milliseconds: int | float) -> str:
         return ""
     minutes = max(1, int(float(milliseconds) // 60000))
     return f"{minutes}m"
+
+
+def episode_display_title(movie: "Movie", fallback_index: int = 0) -> str:
+    stem = Path(movie.path).stem.strip()
+    if re.fullmatch(r"\d+", stem):
+        return f"Episode {int(stem)}"
+    if fallback_index > 0:
+        return f"Episode {fallback_index}"
+    match = re.search(r"(?:^|[\s._\-])(?:ep(?:isode)?[\s._\-]*)?(\d{1,4})(?:v\d+)?(?:$|[\s._\-])", stem, re.IGNORECASE)
+    if match:
+        return f"Episode {int(match.group(1))}"
+    return movie.title
 
 
 def format_bytes(size: int) -> str:
@@ -2462,8 +2490,9 @@ class HomePage(QWidget):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(28, 0, 28, 0)
         header_layout.setSpacing(18)
-        logo = QLabel("D")
+        logo = QLabel("DW!")
         logo.setObjectName("brandLogo")
+        logo.setFont(QFont(BRAND_FONT_FAMILY, 30, QFont.Normal))
         self.search_box = AnimatedSearchBox(header)
         self.search = self.search_box.edit
         self.refresh_button = HomeIconButton()
@@ -2723,6 +2752,12 @@ class EpisodeListItem(QWidget):
         painter.save()
         painter.setClipPath(clip)
         draw_cover(painter, thumb_rect, self.current_pixmap)
+        if self.movie.duration_ms and self.movie.progress_ms:
+            ratio = max(0.0, min(1.0, self.movie.progress_ms / self.movie.duration_ms))
+            bar_height = 4
+            bar_rect = QRect(thumb_rect.x(), thumb_rect.bottom() - bar_height + 1, thumb_rect.width(), bar_height)
+            painter.fillRect(bar_rect, QColor(100, 100, 100, 180))
+            painter.fillRect(QRect(bar_rect.x(), bar_rect.y(), int(bar_rect.width() * ratio), bar_height), QColor("#e50914"))
         if self.hovered:
             painter.fillRect(thumb_rect, QColor(0, 0, 0, 48))
             center = thumb_rect.center()
@@ -5071,7 +5106,8 @@ class MpvController(QObject):
             self.player.mute = True
             self.player.pause = False
             self.player.command("loadfile", str(path), "replace")
-            self.fit_video()
+            self.fill_preview()
+            QTimer.singleShot(120, lambda active=self._generation: self._run_if_current(active, self.fill_preview))
             self.timer.start()
             return True
         except Exception as error:
@@ -5251,16 +5287,40 @@ class MpvController(QObject):
         if not self.player:
             return
         diagnostic_log("mpv.fit_video")
-        for option, value in (
-            ("keepaspect", "yes"),
-            ("keepaspect-window", "no"),
-            ("panscan", "0"),
-            ("video-zoom", "0"),
-            ("video-align-x", "0"),
-            ("video-align-y", "0"),
-            ("video-aspect-override", "no"),
-            ("video-crop", "none"),
-        ):
+        self._apply_video_geometry_options(
+            (
+                ("keepaspect", "yes"),
+                ("keepaspect-window", "no"),
+                ("panscan", "0"),
+                ("video-zoom", "0"),
+                ("video-align-x", "0"),
+                ("video-align-y", "0"),
+                ("video-aspect-override", "no"),
+                ("video-crop", "none"),
+            )
+        )
+
+    def fill_preview(self) -> None:
+        if not self.player:
+            return
+        diagnostic_log("mpv.fill_preview")
+        self._apply_video_geometry_options(
+            (
+                ("keepaspect", "yes"),
+                ("keepaspect-window", "no"),
+                ("panscan", "1"),
+                ("video-zoom", "0"),
+                ("video-align-x", "0"),
+                ("video-align-y", "0"),
+                ("video-aspect-override", "no"),
+                ("video-crop", "none"),
+            )
+        )
+
+    def _apply_video_geometry_options(self, options: tuple[tuple[str, str], ...]) -> None:
+        if not self.player:
+            return
+        for option, value in options:
             try:
                 self.player.command("set", option, value)
             except Exception:
@@ -6736,7 +6796,7 @@ class PlayerPage(QWidget):
                 self.playlist_index,
             )
         self._update_episode_controls()
-        self.title.setText(movie.title)
+        self.title.setText(episode_display_title(movie, self.playlist_index + 1 if self.playlist_index >= 0 else 0))
         self.selected_subtitle = -1
         self.subtitle_preference_applied = False
         self._sync_video_surface_geometry()
@@ -9097,7 +9157,6 @@ class DordieWatchWindow(QMainWindow):
         task = SubtitleCacheTask(collection.movies, self.store, collection.folder)
         self.subtitle_cache_task = task
         self.subtitle_cache_task_key = collection.folder
-        self.home.set_scanning(f"Caching subtitles for {collection.title}...", 0, len(collection.movies))
         dialog = self.series_dialog
         if dialog is not None and dialog.collection.folder == collection.folder:
             dialog.set_subtitle_cache_busy(True, "Checking...")
@@ -9119,7 +9178,6 @@ class DordieWatchWindow(QMainWindow):
     ) -> None:
         if token != self.subtitle_cache_token:
             return
-        self.home.set_scanning(f"Caching subtitles {current} / {total}  {title}", current, total)
         dialog = self.series_dialog
         if dialog is not None and dialog.collection.folder == self.subtitle_cache_task_key:
             dialog.set_subtitle_cache_busy(True, f"Caching {current}/{total}")
@@ -9577,7 +9635,6 @@ QMainWindow, QStackedWidget, #homeContent, #homeScroll,
 #seriesTitle {
     color: #ffffff;
     font-size: 52px;
-    font-weight: 900;
 }
 #seriesMeta {
     color: #d4d4d4;
@@ -9677,13 +9734,11 @@ QMenu#seriesEpisodeRangeMenu::item:selected {
 #episodePanelTitle {
     color: #ffffff;
     font-size: 28px;
-    font-weight: 900;
 }
 #episodeRangePanelTitle {
     background: transparent;
     color: #ffffff;
     font-size: 28px;
-    font-weight: 900;
 }
 #episodeRangeContents {
     background: #262626;
@@ -9712,8 +9767,8 @@ QMenu#seriesEpisodeRangeMenu::item:selected {
 }
 #brandLogo {
     color: #e50914;
-    font-size: 34px;
-    font-weight: 900;
+    font-family: "Moco";
+    font-size: 38px;
 }
 #brandName {
     color: #ffffff;
