@@ -1319,6 +1319,70 @@ Dialogue: 0,0:00:00.00,0:00:03.00,Default,,0,0,0,,Hello
         self.assertEqual(search_right, refresh_x)
         stack.close()
 
+    def test_home_media_nav_filters_anime_and_hentai(self) -> None:
+        app = QApplication.instance() or QApplication([])
+        root = "C:/Videos"
+        movies = [
+            Movie(
+                path=f"{root}/Anime/episode.mkv",
+                title="Episode",
+                root=root,
+                size=0,
+                modified=0,
+                collection=f"{root}/Anime",
+                media_id=1,
+                media_type="anime",
+                collection_title="Anime Title",
+            ),
+            Movie(
+                path=f"{root}/Hentai/episode.mkv",
+                title="Episode",
+                root=root,
+                size=0,
+                modified=0,
+                collection=f"{root}/Hentai",
+                media_id=2,
+                media_type="hentai",
+                collection_title="Hentai Title",
+            ),
+            Movie(
+                path=f"{root}/Unlinked/episode.mkv",
+                title="Episode",
+                root=root,
+                size=0,
+                modified=0,
+                collection=f"{root}/Unlinked",
+                collection_title="Unlinked Title",
+            ),
+        ]
+        home = HomePage()
+        try:
+            self.assertEqual(home.active_media_type, "anime")
+            home.rebuild([root], movies)
+            grid = home.rows_layout.itemAt(0).widget()
+
+            self.assertIsInstance(grid, CollectionGrid)
+            self.assertEqual(
+                [card.collection.title for card in grid.cards],
+                ["Anime Title", "Unlinked Title"],
+            )
+            self.assertEqual(home.media_buttons["anime"].objectName(), "navActive")
+
+            QTest.mouseClick(home.media_buttons["hentai"], Qt.LeftButton)
+            app.processEvents()
+            home.rebuild([root], movies)
+            grid = home.rows_layout.itemAt(0).widget()
+
+            self.assertIsInstance(grid, CollectionGrid)
+            self.assertEqual(
+                [card.collection.title for card in grid.cards],
+                ["Hentai Title"],
+            )
+            self.assertEqual(home.media_buttons["anime"].objectName(), "navItem")
+            self.assertEqual(home.media_buttons["hentai"].objectName(), "navActive")
+        finally:
+            home.close()
+
     def test_home_library_grid_reflows_on_resize(self) -> None:
         app = QApplication.instance() or QApplication([])
         collections = []

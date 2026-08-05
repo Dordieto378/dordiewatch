@@ -661,6 +661,17 @@ class LibraryCollection:
     def last_played(self) -> float:
         return max((movie.last_played for movie in self.movies), default=0.0)
 
+    @property
+    def media_type(self) -> str:
+        media_types = {
+            str(movie.media_type or "").casefold()
+            for movie in self.movies
+            if str(movie.media_type or "").strip()
+        }
+        if "hentai" in media_types and "anime" not in media_types:
+            return "hentai"
+        return "anime"
+
 
 def build_collections(
     movies: Iterable[Movie], roots: Iterable[str] = ()
@@ -2477,9 +2488,11 @@ class HomePage(QWidget):
     refresh_requested = Signal()
     movie_activated = Signal(object, object)
     hero_play_requested = Signal(object)
+    media_type_changed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
+        self.active_media_type = "anime"
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -2493,6 +2506,22 @@ class HomePage(QWidget):
         logo = QLabel("DW!")
         logo.setObjectName("brandLogo")
         logo.setFont(QFont(BRAND_FONT_FAMILY, 30, QFont.Normal))
+        self.media_nav = QWidget()
+        self.media_nav.setObjectName("homeMediaNav")
+        media_nav_layout = QHBoxLayout(self.media_nav)
+        media_nav_layout.setContentsMargins(0, 0, 0, 0)
+        media_nav_layout.setSpacing(22)
+        self.media_buttons: dict[str, QPushButton] = {}
+        for media_type, label in (("anime", "Anime"), ("hentai", "Hentai")):
+            button = QPushButton(label)
+            button.setFlat(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            button.clicked.connect(
+                lambda _checked=False, selected=media_type: self.set_media_type(selected)
+            )
+            self.media_buttons[media_type] = button
+            media_nav_layout.addWidget(button)
         self.search_box = AnimatedSearchBox(header)
         self.search = self.search_box.edit
         self.refresh_button = HomeIconButton()
@@ -2506,6 +2535,7 @@ class HomePage(QWidget):
         header_controls_layout.setSpacing(0)
         header_controls_layout.addWidget(self.refresh_button)
         header_layout.addWidget(logo)
+        header_layout.addWidget(self.media_nav)
         header_layout.addStretch()
         header_layout.addWidget(self.header_controls)
         root.addWidget(header)
@@ -2550,8 +2580,28 @@ class HomePage(QWidget):
         self.refresh_button.installEventFilter(self)
         self._search_position_pending = False
         self.search_box.raise_()
+        self._sync_media_nav()
         self._update_header_background(0)
         self._schedule_position_search_box()
+
+    def set_media_type(self, media_type: str) -> None:
+        normalized = str(media_type or "").casefold()
+        if normalized not in {"anime", "hentai"}:
+            return
+        if normalized == self.active_media_type:
+            return
+        self.active_media_type = normalized
+        self._sync_media_nav()
+        self.media_type_changed.emit(normalized)
+
+    def _sync_media_nav(self) -> None:
+        for media_type, button in self.media_buttons.items():
+            button.setObjectName(
+                "navActive" if media_type == self.active_media_type else "navItem"
+            )
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
 
     def _update_header_background(self, value: Optional[int] = None) -> None:
         if value is None:
@@ -2619,7 +2669,11 @@ class HomePage(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        collections = build_collections(movies, roots)
+        collections = [
+            collection
+            for collection in build_collections(movies, roots)
+            if collection.media_type == self.active_media_type
+        ]
         words = [word.casefold() for word in query.split() if word]
         filtered = [
             collection
@@ -8395,6 +8449,7 @@ class DordieWatchWindow(QMainWindow):
         self.home.refresh_requested.connect(self.refresh_libraries)
         self.home.movie_activated.connect(self.open_collection)
         self.home.hero_play_requested.connect(self.play_movie_from_home_hero)
+        self.home.media_type_changed.connect(self.rebuild_home)
         self.home.search.textChanged.connect(self.rebuild_home)
         self.player.back_requested.connect(self.show_previous_page)
         self.player.progress_saved.connect(self.save_progress)
@@ -8990,6 +9045,9 @@ class DordieWatchWindow(QMainWindow):
             collection.movies, [payload], self.store
         )
 
+        payload_media_type = str(payload.get("type") or "").casefold()
+        if payload_media_type in {"anime", "hentai"}:
+            self.home.set_media_type(payload_media_type)
         self.save_library()
         self.rebuild_home()
         refreshed = match_website_collection(
@@ -9776,12 +9834,27 @@ QMenu#seriesEpisodeRangeMenu::item:selected {
     font-weight: 800;
     letter-spacing: 1px;
 }
-#navActive {
+#homeMediaNav {
+    background: transparent;
+}
+QPushButton#navActive, QPushButton#navItem {
+    background: transparent;
+    border: none;
+    padding: 4px 0;
+    font-size: 14px;
+}
+QPushButton#navActive {
     color: #ffffff;
     font-weight: 700;
 }
-#navItem {
+QPushButton#navItem {
     color: #a8a8a8;
+    font-weight: 600;
+}
+QPushButton#navItem:hover, QPushButton#navItem:pressed {
+    color: #ffffff;
+    background: transparent;
+    border: none;
 }
 #homeSearchBox {
     background: transparent;
