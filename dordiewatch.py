@@ -3794,9 +3794,32 @@ SUBTITLE_CODEC_EXTENSIONS = {
     "srt": ".srt",
 }
 SUBTITLE_FOLDER_NAMES = {"subs", "sub", "subtitle", "subtitles"}
-DIALOGUE_STYLE_NAME_PREFIXES = ("main", "default")
-SUBTITLE_STYLE_CACHE_VERSION = "netflix-sans-bold-dialogue-v5"
+DIALOGUE_STYLE_NAME_PREFIXES = ("main", "default", "otome dori dialogue")
+SUBTITLE_STYLE_CACHE_VERSION = "netflix-sans-bold-dialogue-v8"
 SUBTITLE_RESUME_PREROLL_MS = 1500
+SUBTITLE_STYLE_BASE_PLAYRES_Y = 720.0
+SUBTITLE_STYLE_FONT_SIZE = 51.0
+SUBTITLE_STYLE_OUTLINE = 2.4
+SUBTITLE_STYLE_SHADOW = 1.1
+SUBTITLE_STYLE_MARGIN_LR = 150.0
+SUBTITLE_STYLE_MARGIN_V = 40.0
+SUBTITLE_STYLE_FIXED_FIELDS = {
+    "primarycolour": "&H00FFFFFF",
+    "secondarycolour": "&H000000FF",
+    "outlinecolour": "&H00000000",
+    "backcolour": "&HA0000000",
+    "bold": "-1",
+    "italic": "0",
+    "underline": "0",
+    "strikeout": "0",
+    "scalex": "100",
+    "scaley": "100",
+    "spacing": "0",
+    "angle": "0",
+    "borderstyle": "1",
+    "alignment": "2",
+    "encoding": "1",
+}
 
 
 def bundled_font_dir() -> Path:
@@ -3810,6 +3833,25 @@ def movie_subtitle_folder(movie: Movie) -> Path:
     if folder.is_file():
         folder = folder.parent
     return folder
+
+
+def movie_has_external_subtitle_folder(movie: Movie) -> bool:
+    folder = movie_subtitle_folder(movie)
+    if not folder.is_dir():
+        return False
+    try:
+        return any(
+            child.is_dir() and child.name.casefold() in SUBTITLE_FOLDER_NAMES
+            for child in folder.iterdir()
+        )
+    except OSError as error:
+        diagnostic_log(
+            "subtitle.external.folder_exists_error",
+            movie=movie.title,
+            folder=str(folder),
+            error=repr(error),
+        )
+        return False
 
 
 def external_subtitle_source_for_movie(movie: Movie) -> Optional[Path]:
@@ -3915,6 +3957,106 @@ def _normalized_ass_font_name(value: str) -> str:
 def _ass_style_name_is_dialogue(value: str) -> bool:
     style_name = _normalized_ass_style_name(value)
     return any(style_name.startswith(prefix) for prefix in DIALOGUE_STYLE_NAME_PREFIXES)
+
+
+def _parse_ratio(value: object) -> float:
+    text = str(value or "").strip()
+    if not text or text in {"0:1", "1:0", "N/A"}:
+        return 1.0
+    if ":" in text:
+        left, right = text.split(":", 1)
+        try:
+            numerator = float(left)
+            denominator = float(right)
+            if numerator > 0 and denominator > 0:
+                return numerator / denominator
+        except ValueError:
+            return 1.0
+    try:
+        value_float = float(text)
+        return value_float if value_float > 0 else 1.0
+    except ValueError:
+        return 1.0
+
+
+def subtitle_horizontal_scale_for_video(video: Path, ffprobe: Optional[str]) -> float:
+    if not ffprobe:
+        return 100.0
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=sample_aspect_ratio",
+        "-of",
+        "json",
+        str(video),
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            **process_options(),
+        )
+        data = json.loads(result.stdout or "{}")
+        stream = (data.get("streams") or [{}])[0]
+        sar = _parse_ratio(stream.get("sample_aspect_ratio"))
+        if abs(sar - 1.0) < 0.01:
+            return 100.0
+        scale = 100.0 / sar
+        corrected = max(50.0, min(150.0, scale))
+        diagnostic_log(
+            "subtitle.ass.pixel_aspect_correction",
+            video=str(video),
+            sample_aspect_ratio=stream.get("sample_aspect_ratio"),
+            horizontal_scale=corrected,
+        )
+        return corrected
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, json.JSONDecodeError) as error:
+        diagnostic_log("subtitle.ass.pixel_aspect_error", video=str(video), error=repr(error))
+        return 100.0
+
+
+def _ass_script_playres_y(lines: list[str]) -> float:
+    for line in lines[:120]:
+        if line.strip().casefold().startswith("playresy:"):
+            try:
+                value = float(line.split(":", 1)[1].strip())
+                if value > 0:
+                    return value
+            except ValueError:
+                break
+    return SUBTITLE_STYLE_BASE_PLAYRES_Y
+
+
+def _format_ass_number(value: float) -> str:
+    if abs(value - round(value)) < 0.01:
+        return str(int(round(value)))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _ass_fixed_dialogue_style_values(playres_y: float, horizontal_scale: float = 100.0) -> dict[str, str]:
+    scale = max(0.1, float(playres_y) / SUBTITLE_STYLE_BASE_PLAYRES_Y)
+    values = dict(SUBTITLE_STYLE_FIXED_FIELDS)
+    values["scalex"] = _format_ass_number(max(50.0, min(150.0, float(horizontal_scale))))
+    values.update(
+        {
+            "fontsize": _format_ass_number(SUBTITLE_STYLE_FONT_SIZE * scale),
+            "outline": _format_ass_number(SUBTITLE_STYLE_OUTLINE * scale),
+            "shadow": _format_ass_number(SUBTITLE_STYLE_SHADOW * scale),
+            "marginl": _format_ass_number(SUBTITLE_STYLE_MARGIN_LR * scale),
+            "marginr": _format_ass_number(SUBTITLE_STYLE_MARGIN_LR * scale),
+            "marginv": _format_ass_number(SUBTITLE_STYLE_MARGIN_V * scale),
+        }
+    )
+    return values
 
 
 def _ass_dialogue_style_fonts(lines: list[str]) -> set[str]:
@@ -4040,10 +4182,12 @@ def ensure_ass_cache_normalized(path: Path) -> None:
         diagnostic_log("subtitle.ass.cache_normalize_error", path=str(path), error=repr(error))
 
 
-def rewrite_ass_dialogue_styles(source: Path, target: Path) -> None:
+def rewrite_ass_dialogue_styles(source: Path, target: Path, horizontal_scale: float = 100.0) -> None:
     text, encoding = _read_subtitle_text(source)
     lines = text.splitlines(keepends=True)
     dialogue_fonts = _ass_dialogue_style_fonts(lines)
+    playres_y = _ass_script_playres_y(lines)
+    fixed_style_values = _ass_fixed_dialogue_style_values(playres_y, horizontal_scale)
     output: list[str] = []
     in_styles = False
     format_fields: list[str] = []
@@ -4079,8 +4223,7 @@ def rewrite_ass_dialogue_styles(source: Path, target: Path) -> None:
             except ValueError:
                 output.append(line)
                 continue
-            bold_index = format_fields.index("bold") if "bold" in format_fields else -1
-            required_length = max(name_index, font_index, bold_index)
+            required_length = max(name_index, font_index)
             if len(parts) > required_length:
                 style_name_raw = parts[name_index].strip()
                 style_name = style_name_raw.casefold()
@@ -4088,8 +4231,12 @@ def rewrite_ass_dialogue_styles(source: Path, target: Path) -> None:
                 style_names.append(style_name_raw)
                 if _ass_style_name_is_dialogue(style_name_raw) or (style_font and style_font in dialogue_fonts):
                     parts[font_index] = _replace_ass_field(parts[font_index], APP_FONT_FAMILY)
-                    if bold_index >= 0:
-                        parts[bold_index] = _replace_ass_field(parts[bold_index], "-1")
+                    for field_name, field_value in fixed_style_values.items():
+                        if field_name not in format_fields:
+                            continue
+                        field_index = format_fields.index(field_name)
+                        if len(parts) > field_index:
+                            parts[field_index] = _replace_ass_field(parts[field_index], field_value)
                     rewritten_styles.append(style_name_raw)
                     line = f"{prefix}:{','.join(parts)}{newline}"
         output.append(line)
@@ -4107,11 +4254,14 @@ def rewrite_ass_dialogue_styles(source: Path, target: Path) -> None:
         styles=";".join(style_names[:24]) or "none",
         rewritten=";".join(rewritten_styles) or "none",
         dialogue_fonts=";".join(sorted(dialogue_fonts)) or "none",
+        playres_y=playres_y,
+        fixed_size=fixed_style_values.get("fontsize", ""),
+        horizontal_scale=horizontal_scale,
     )
 
 
 def cached_external_subtitle_for_movie(
-    movie: Movie, cache_dir: Path, create: bool = True
+    movie: Movie, cache_dir: Path, create: bool = True, ffprobe: Optional[str] = None
 ) -> Optional[Path]:
     source = external_subtitle_source_for_movie(movie)
     if source is None:
@@ -4127,7 +4277,8 @@ def cached_external_subtitle_for_movie(
         return source
     try:
         stat = source.stat()
-        identity = f"external|{SUBTITLE_STYLE_CACHE_VERSION}|{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{APP_FONT_FAMILY}"
+        horizontal_scale = subtitle_horizontal_scale_for_video(Path(movie.path), ffprobe)
+        identity = f"external|{SUBTITLE_STYLE_CACHE_VERSION}|{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{APP_FONT_FAMILY}|sx={horizontal_scale:.4f}"
     except OSError as error:
         diagnostic_log("subtitle.external.cache.stat_error", movie=movie.title, source=str(source), error=repr(error))
         return None
@@ -4161,7 +4312,7 @@ def cached_external_subtitle_for_movie(
             target=str(target),
             digest=digest,
         )
-        rewrite_ass_dialogue_styles(source, target)
+        rewrite_ass_dialogue_styles(source, target, horizontal_scale=horizontal_scale)
         return target
     except OSError as error:
         diagnostic_log("subtitle.cache.error", source=str(source), error=repr(error))
@@ -4244,6 +4395,7 @@ def cached_embedded_subtitles_for_movie(
         diagnostic_log("subtitle.embedded.video_stat_error", movie=movie.title, video=str(video), error=repr(error))
         return []
     tracks: list[tuple[Path, str, str]] = []
+    horizontal_scale = subtitle_horizontal_scale_for_video(video, ffprobe)
     streams = probe_subtitle_streams(video, ffprobe)
     diagnostic_log(
         "subtitle.embedded.scan",
@@ -4272,7 +4424,7 @@ def cached_embedded_subtitles_for_movie(
         language = safe_description(str((stream.get("tags") or {}).get("language", ""))).strip()
         identity = (
             f"embedded|{SUBTITLE_STYLE_CACHE_VERSION}|{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|"
-            f"{stream_index}|{codec}|{APP_FONT_FAMILY}"
+            f"{stream_index}|{codec}|{APP_FONT_FAMILY}|sx={horizontal_scale:.4f}"
         )
         digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
         raw_target = cache_dir / f"{digest}.raw{extension}"
@@ -4344,7 +4496,7 @@ def cached_embedded_subtitles_for_movie(
                     )
                     continue
                 if extension in {".ass", ".ssa"}:
-                    rewrite_ass_dialogue_styles(raw_target, final_target)
+                    rewrite_ass_dialogue_styles(raw_target, final_target, horizontal_scale=horizontal_scale)
                 else:
                     raw_target.replace(final_target)
                 diagnostic_log(
@@ -4394,13 +4546,27 @@ def cached_subtitle_tracks_for_movie(
         create=create,
     )
     tracks: list[tuple[str, str, str, str]] = []
-    external_subtitle = cached_external_subtitle_for_movie(movie, cache_dir, create=create)
+    external_subtitle = cached_external_subtitle_for_movie(movie, cache_dir, create=create, ffprobe=ffprobe)
     if external_subtitle is not None:
         tracks.append((str(external_subtitle), "English", "eng", "external"))
-    for subtitle_path, label, language in cached_embedded_subtitles_for_movie(
-        movie, cache_dir, ffprobe, ffmpeg, create=create
-    ):
-        tracks.append((str(subtitle_path), label, language, "embedded"))
+        diagnostic_log(
+            "subtitle.cache.external_priority",
+            movie=movie.title,
+            video=str(movie.path),
+            track=diagnostic_path_summary(external_subtitle),
+        )
+    elif movie_has_external_subtitle_folder(movie):
+        diagnostic_log(
+            "subtitle.cache.external_priority.no_match",
+            movie=movie.title,
+            video=str(movie.path),
+            reason="external_subtitle_folder_exists",
+        )
+    else:
+        for subtitle_path, label, language in cached_embedded_subtitles_for_movie(
+            movie, cache_dir, ffprobe, ffmpeg, create=create
+        ):
+            tracks.append((str(subtitle_path), label, language, "embedded"))
     diagnostic_log(
         "subtitle.cache.tracks.done",
         movie=movie.title,
@@ -4423,6 +4589,7 @@ def subtitle_cache_readiness_for_movie(
     expected = 0
     ready = 0
     source = external_subtitle_source_for_movie(movie)
+    external_folder_exists = source is not None or movie_has_external_subtitle_folder(movie)
     if source is not None:
         expected += 1
         if source.suffix.casefold() not in {".ass", ".ssa"}:
@@ -4430,15 +4597,33 @@ def subtitle_cache_readiness_for_movie(
         else:
             try:
                 stat = source.stat()
+                horizontal_scale = subtitle_horizontal_scale_for_video(Path(movie.path), ffprobe)
                 identity = (
                     f"external|{SUBTITLE_STYLE_CACHE_VERSION}|{source.resolve()}|"
-                    f"{stat.st_size}|{stat.st_mtime_ns}|{APP_FONT_FAMILY}"
+                    f"{stat.st_size}|{stat.st_mtime_ns}|{APP_FONT_FAMILY}|sx={horizontal_scale:.4f}"
                 )
                 digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
                 if (cache_dir / f"{digest}{source.suffix.casefold()}").is_file():
                     ready += 1
             except OSError:
                 pass
+        diagnostic_log(
+            "subtitle.cache.readiness",
+            movie=movie.title,
+            expected=expected,
+            ready=ready,
+            mode="external_priority",
+        )
+        return expected, ready
+    if external_folder_exists:
+        diagnostic_log(
+            "subtitle.cache.readiness",
+            movie=movie.title,
+            expected=expected,
+            ready=ready,
+            mode="external_priority_no_match",
+        )
+        return expected, ready
     if not ffmpeg or not ffprobe:
         return expected, ready
     video = Path(movie.path)
@@ -4446,6 +4631,7 @@ def subtitle_cache_readiness_for_movie(
         stat = video.stat()
     except OSError:
         return expected, ready
+    horizontal_scale = subtitle_horizontal_scale_for_video(video, ffprobe)
     for stream in probe_subtitle_streams(video, ffprobe):
         codec = safe_description(str(stream.get("codec_name", ""))).casefold()
         extension = SUBTITLE_CODEC_EXTENSIONS.get(codec)
@@ -4458,7 +4644,7 @@ def subtitle_cache_readiness_for_movie(
         expected += 1
         identity = (
             f"embedded|{SUBTITLE_STYLE_CACHE_VERSION}|{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|"
-            f"{stream_index}|{codec}|{APP_FONT_FAMILY}"
+            f"{stream_index}|{codec}|{APP_FONT_FAMILY}|sx={horizontal_scale:.4f}"
         )
         digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
         if (cache_dir / f"{digest}{extension}").is_file():
@@ -4951,7 +5137,7 @@ class MpvController(QObject):
         self._generation = 0
         self._opened_at = 0.0
         self._has_media = False
-        self._using_cached_embedded_subtitles = False
+        self._using_managed_subtitles = False
         self._last_valid_time_ms = 0
         self._last_valid_length_ms = 0
         self._last_subtitle_track_signature = ""
@@ -5064,6 +5250,7 @@ class MpvController(QObject):
         volume: int = 80,
         autoplay: bool = True,
         subtitle_tracks: Optional[list[tuple[str, str, str, str]]] = None,
+        managed_subtitle_mode: bool = False,
     ) -> bool:
         if not self.available:
             diagnostic_log("mpv.open.unavailable", path=path)
@@ -5082,9 +5269,7 @@ class MpvController(QObject):
             self._last_subtitle_text_state = "unset"
             self._subtitle_empty_deadlines_logged.clear()
             managed_subtitles = list(subtitle_tracks or [])
-            self._using_cached_embedded_subtitles = any(
-                len(track) >= 4 and track[3] == "embedded" for track in managed_subtitles
-            )
+            self._using_managed_subtitles = bool(managed_subtitles) or bool(managed_subtitle_mode)
             diagnostic_log(
                 "mpv.open",
                 generation=generation,
@@ -5093,11 +5278,12 @@ class MpvController(QObject):
                 volume=volume,
                 autoplay=autoplay,
                 subtitle_tracks=len(managed_subtitles),
+                managed_subtitle_mode=managed_subtitle_mode,
                 subtitle_track_details="; ".join(
                     f"{source}|{title}|{language}|{diagnostic_path_summary(subtitle_path)}"
                     for subtitle_path, title, language, source in managed_subtitles
                 ) or "none",
-                cached_embedded=self._using_cached_embedded_subtitles,
+                managed_subtitles_active=self._using_managed_subtitles,
                 surface=widget_snapshot(self.surface),
             )
             defer_autoplay_for_subtitles = bool(autoplay and managed_subtitles)
@@ -5397,7 +5583,7 @@ class MpvController(QObject):
             except Exception:
                 pass
         self._has_media = False
-        self._using_cached_embedded_subtitles = False
+        self._using_managed_subtitles = False
         self._opened_at = 0.0
         self._last_playing = False
         self._ended_emitted = False
@@ -5518,7 +5704,7 @@ class MpvController(QObject):
 
     def subtitle_tracks(self) -> list[tuple[int, str]]:
         tracks = self._tracks_of_type("sub")
-        if self._using_cached_embedded_subtitles:
+        if self._using_managed_subtitles:
             tracks = [
                 track
                 for track in tracks
@@ -6865,12 +7051,14 @@ class PlayerPage(QWidget):
             self.ffmpeg,
             create=False,
         )
+        external_subtitle_mode = bool(subtitle_tracks) or movie_has_external_subtitle_folder(movie)
         diagnostic_log(
             "player.subtitle.cached_tracks",
             title=movie.title,
             count=len(subtitle_tracks),
             preference_key=self._subtitle_preference_key(),
             saved_preference=self._saved_subtitle_preference(),
+            external_subtitle_mode=external_subtitle_mode,
             tracks="; ".join(
                 f"{source}|{label}|{language}|{diagnostic_path_summary(path)}"
                 for path, label, language, source in subtitle_tracks
@@ -6885,6 +7073,7 @@ class PlayerPage(QWidget):
             int(self.settings.get("volume", 80)),
             autoplay=autoplay,
             subtitle_tracks=subtitle_tracks,
+            managed_subtitle_mode=external_subtitle_mode,
         )
         if not autoplay:
             QTimer.singleShot(
