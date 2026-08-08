@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import base64
 import binascii
 import ctypes
@@ -12,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import textwrap
 import time
@@ -907,17 +909,14 @@ class DordieWatchStore:
         self.base_dir = app_data_dir()
         self.preview_dir = self.base_dir / "previews"
         self.website_cover_dir = self.base_dir / "website-covers"
-        self.subtitle_cache_dir = self.base_dir / "subtitle-cache"
         self.preview_dir.mkdir(parents=True, exist_ok=True)
         self.website_cover_dir.mkdir(parents=True, exist_ok=True)
-        self.subtitle_cache_dir.mkdir(parents=True, exist_ok=True)
         self.file = self.base_dir / "library.json"
 
     def load(self) -> tuple[list[str], list[Movie], dict]:
         defaults = {
             "volume": 80,
             "series_subtitles": {},
-            "subtitle_cache_ready": {},
             "dordielist_library_url": "",
         }
         if not self.file.is_file():
@@ -1695,133 +1694,6 @@ class PreviewGenerationTask:
                 return
 
 
-
-class SubtitleCacheSignals(QObject):
-    progress = Signal(int, int, str)
-    finished = Signal(object)
-    failed = Signal(str)
-
-
-class SubtitleCacheTask:
-    def __init__(
-        self,
-        movies: Iterable[Movie],
-        store: DordieWatchStore,
-        task_key: str,
-    ) -> None:
-        from PySide6.QtCore import QRunnable
-
-        class Runnable(QRunnable):
-            def __init__(inner, owner: "SubtitleCacheTask") -> None:
-                super().__init__()
-                inner.owner = owner
-
-            def run(inner) -> None:
-                inner.owner.run()
-
-        self.movies = tuple(Movie.from_dict(movie.to_dict()) for movie in movies)
-        self.store = store
-        self.task_key = task_key
-        self.signals = SubtitleCacheSignals()
-        self.runnable = Runnable(self)
-        self.cancelled = threading.Event()
-        self.ffmpeg = find_binary("ffmpeg")
-        self.ffprobe = find_binary("ffprobe")
-
-    def cancel(self) -> None:
-        self.cancelled.set()
-
-    def run(self) -> None:
-        total = len(self.movies)
-        existing_tracks = 0
-        ready_tracks = 0
-        try:
-            for index, movie in enumerate(self.movies, 1):
-                if self.cancelled.is_set():
-                    return
-                self.signals.progress.emit(index - 1, total, movie.title)
-                before = cached_subtitle_tracks_for_movie(
-                    movie,
-                    self.store.subtitle_cache_dir,
-                    self.ffprobe,
-                    self.ffmpeg,
-                    create=False,
-                )
-                existing_tracks += len(before)
-                after = cached_subtitle_tracks_for_movie(
-                    movie,
-                    self.store.subtitle_cache_dir,
-                    self.ffprobe,
-                    self.ffmpeg,
-                    create=True,
-                )
-                ready_tracks += len(after)
-                self.signals.progress.emit(index, total, movie.title)
-            self.signals.finished.emit(
-                {
-                    "key": self.task_key,
-                    "videos": total,
-                    "tracks": ready_tracks,
-                    "created": max(0, ready_tracks - existing_tracks),
-                    "already": existing_tracks,
-                }
-            )
-        except Exception as error:
-            diagnostic_log("subtitle_cache_task.failed", key=self.task_key, error=repr(error))
-            try:
-                self.signals.failed.emit(str(error))
-            except RuntimeError:
-                return
-
-class SubtitleCacheStatusSignals(QObject):
-    finished = Signal(object)
-
-
-class SubtitleCacheStatusTask:
-    def __init__(
-        self,
-        movies: Iterable[Movie],
-        store: DordieWatchStore,
-        task_key: str,
-    ) -> None:
-        from PySide6.QtCore import QRunnable
-
-        class Runnable(QRunnable):
-            def __init__(inner, owner: "SubtitleCacheStatusTask") -> None:
-                super().__init__()
-                inner.owner = owner
-
-            def run(inner) -> None:
-                inner.owner.run()
-
-        self.movies = tuple(Movie.from_dict(movie.to_dict()) for movie in movies)
-        self.store = store
-        self.task_key = task_key
-        self.signals = SubtitleCacheStatusSignals()
-        self.runnable = Runnable(self)
-        self.ffmpeg = find_binary("ffmpeg")
-        self.ffprobe = find_binary("ffprobe")
-
-    def run(self) -> None:
-        expected_tracks = 0
-        ready_tracks = 0
-        for movie in self.movies:
-            expected, ready = subtitle_cache_readiness_for_movie(
-                movie,
-                self.store.subtitle_cache_dir,
-                self.ffprobe,
-                self.ffmpeg,
-            )
-            expected_tracks += expected
-            ready_tracks += ready
-        self.signals.finished.emit(
-            {
-                "key": self.task_key,
-                "videos": len(self.movies),
-                "expected": expected_tracks,
-                "ready": ready_tracks,
-            }
-        )
 
 
 class MovieCard(QWidget):
@@ -3195,7 +3067,6 @@ class PlayerLaunchTransitionOverlay(QWidget):
 
 class SeriesDetailsDialog(QWidget):
     movie_activated = Signal(object)
-    subtitle_cache_requested = Signal(object)
     finished = Signal()
 
     def __init__(
@@ -3224,10 +3095,6 @@ class SeriesDetailsDialog(QWidget):
         self.hero = SeriesHero(collection)
         self.hero.close_requested.connect(self.request_close)
         self.hero.play_requested.connect(lambda: self._play_movie(collection.representative))
-        self.cache_button: Optional[QPushButton] = None
-        self.subtitle_cache_busy = False
-        self.subtitle_cache_ready = False
-        self.subtitle_cache_text = "Cache Subtitles"
 
         scroll = QScrollArea()
         scroll.setObjectName("seriesScroll")
@@ -3263,7 +3130,6 @@ class SeriesDetailsDialog(QWidget):
             self._rebuild_episode_rows()
             panel_layout.addWidget(self.episodes_shell)
         else:
-            panel_layout.addWidget(self._build_movie_cache_row())
             panel_layout.addStretch()
         content_layout.addWidget(self.panel, 0, Qt.AlignHCenter | Qt.AlignTop)
         self._outside_click_widgets = {content, scroll.viewport()}
@@ -3344,32 +3210,6 @@ class SeriesDetailsDialog(QWidget):
         button.setMenu(menu)
         return button
 
-    def _build_cache_button(self) -> QPushButton:
-        button = QPushButton("Cache Subtitles")
-        button.setObjectName("seriesCacheButton")
-        button.setFixedWidth(172)
-        button.clicked.connect(lambda: self.subtitle_cache_requested.emit(self.collection))
-        self.cache_button = button
-        self._sync_cache_button()
-        return button
-
-    def _sync_cache_button(self) -> None:
-        button = self.cache_button
-        if button is None:
-            return
-        button.setEnabled(not self.subtitle_cache_busy)
-        button.setText(self.subtitle_cache_text or ("Recache" if self.subtitle_cache_ready else "Cache Subtitles"))
-
-    def _build_movie_cache_row(self) -> QWidget:
-        row_widget = QWidget()
-        row_widget.setObjectName("seriesMovieCacheRow")
-        row = QHBoxLayout(row_widget)
-        row.setContentsMargins(48, 28, 48, 0)
-        row.setSpacing(0)
-        row.addStretch()
-        row.addWidget(self._build_cache_button())
-        return row_widget
-
     def _rebuild_episode_rows(self) -> None:
         if self.episodes_layout is None:
             return
@@ -3382,9 +3222,7 @@ class SeriesDetailsDialog(QWidget):
         heading.setObjectName("seriesEpisodesHeading")
         heading_row.addWidget(heading)
         heading_row.addStretch()
-        heading_row.addWidget(self._build_cache_button())
         if total > self.episode_page_size:
-            heading_row.addSpacing(12)
             heading_row.addWidget(self._build_episode_range_button())
         self.episodes_layout.addLayout(heading_row)
         self.episodes_layout.addSpacing(16)
@@ -3652,25 +3490,6 @@ class SeriesDetailsDialog(QWidget):
     def _apply_rounded_mask(self) -> None:
         self.clearMask()
 
-    def set_subtitle_cache_busy(self, busy: bool, text: str = "") -> None:
-        self.subtitle_cache_busy = busy
-        if busy:
-            self.subtitle_cache_ready = False
-        self.subtitle_cache_text = text or ("Caching..." if busy else "Cache Subtitles")
-        self._sync_cache_button()
-
-    def set_subtitle_cache_ready(self, ready: bool, text: str = "") -> None:
-        self.subtitle_cache_busy = False
-        self.subtitle_cache_ready = ready
-        self.subtitle_cache_text = text or ("Recache" if ready else "Cache Subtitles")
-        self._sync_cache_button()
-
-    def set_subtitle_cache_status(self, text: str) -> None:
-        self.subtitle_cache_busy = False
-        self.subtitle_cache_ready = text.casefold() in {"cache ready", "cache saved", "saved", "recache"}
-        self.subtitle_cache_text = text or ("Recache" if self.subtitle_cache_ready else "Cache Subtitles")
-        self._sync_cache_button()
-
     def _play_movie(self, movie: Movie) -> None:
         if self._launching_player:
             return
@@ -3795,20 +3614,25 @@ SUBTITLE_CODEC_EXTENSIONS = {
 }
 SUBTITLE_FOLDER_NAMES = {"subs", "sub", "subtitle", "subtitles"}
 DIALOGUE_STYLE_NAME_PREFIXES = ("main", "default", "otome dori dialogue")
-SUBTITLE_STYLE_CACHE_VERSION = "netflix-sans-bold-dialogue-v8"
 SUBTITLE_RESUME_PREROLL_MS = 1500
-SUBTITLE_STYLE_BASE_PLAYRES_Y = 720.0
-SUBTITLE_STYLE_FONT_SIZE = 51.0
-SUBTITLE_STYLE_OUTLINE = 2.4
-SUBTITLE_STYLE_SHADOW = 1.1
-SUBTITLE_STYLE_MARGIN_LR = 150.0
-SUBTITLE_STYLE_MARGIN_V = 40.0
+SUBTITLE_DIALOGUE_FONT_NAME = "NetflixSans-Bold"
+SUBTITLE_REFERENCE_PLAYRES_Y = 1036.0
+SUBTITLE_REFERENCE_FONT_SIZE = 68.0
+SUBTITLE_REFERENCE_OUTLINE = 3.5
+SUBTITLE_REFERENCE_SHADOW = 1.0
+SUBTITLE_REFERENCE_MARGIN_LR = 180.0
+SUBTITLE_REFERENCE_MARGIN_V = 52.0
+SUBTITLE_REFERENCE_DEFAULT_OUTLINE = "&H0038183A"
+SUBTITLE_REFERENCE_DEFAULT_BACK = "&HC824000B"
+SUBTITLE_REFERENCE_ALT_OUTLINE = "&H00440100"
+SUBTITLE_REFERENCE_ALT_BACK = "&HC8000000"
 SUBTITLE_STYLE_FIXED_FIELDS = {
+    "fontname": SUBTITLE_DIALOGUE_FONT_NAME,
     "primarycolour": "&H00FFFFFF",
     "secondarycolour": "&H000000FF",
-    "outlinecolour": "&H00000000",
-    "backcolour": "&HA0000000",
-    "bold": "-1",
+    "outlinecolour": SUBTITLE_REFERENCE_DEFAULT_OUTLINE,
+    "backcolour": SUBTITLE_REFERENCE_DEFAULT_BACK,
+    "bold": "0",
     "italic": "0",
     "underline": "0",
     "strikeout": "0",
@@ -3820,6 +3644,30 @@ SUBTITLE_STYLE_FIXED_FIELDS = {
     "alignment": "2",
     "encoding": "1",
 }
+SUBTITLE_RUNTIME_TEMP_FILES: set[Path] = set()
+ASS_DIALOGUE_VISUAL_OVERRIDE_PATTERN = re.compile(
+    r"\\(?:"
+    r"fn[^\\}]*|"
+    r"fs[+-]?\d+(?:\.\d+)?|"
+    r"bord[+-]?\d*(?:\.\d+)?|xbord[+-]?\d*(?:\.\d+)?|ybord[+-]?\d*(?:\.\d+)?|"
+    r"shad[+-]?\d*(?:\.\d+)?|xshad[+-]?\d*(?:\.\d+)?|yshad[+-]?\d*(?:\.\d+)?|"
+    r"blur[+-]?\d*(?:\.\d+)?|be\d*|"
+    r"fscx[+-]?\d*(?:\.\d+)?|fscy[+-]?\d*(?:\.\d+)?|fsp[+-]?\d*(?:\.\d+)?|"
+    r"[1234]?c&H[0-9A-Fa-f]+&|[1234]?a&H[0-9A-Fa-f]+&|alpha&H[0-9A-Fa-f]+&"
+    r")"
+)
+ASS_OVERRIDE_BLOCK_PATTERN = re.compile(r"\{([^{}]*)\}")
+
+
+def _cleanup_runtime_subtitle_temp_files() -> None:
+    for path in list(SUBTITLE_RUNTIME_TEMP_FILES):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+atexit.register(_cleanup_runtime_subtitle_temp_files)
 
 
 def bundled_font_dir() -> Path:
@@ -3954,6 +3802,19 @@ def _normalized_ass_font_name(value: str) -> str:
     return value.strip().casefold()
 
 
+def _ass_font_is_dordiewatch_dialogue(value: str) -> bool:
+    compact = re.sub(r"[^a-z0-9]", "", value.casefold())
+    return compact == "netflixsansbold"
+
+
+def _strip_dialogue_visual_override_tags(text: str) -> str:
+    def replace_block(match: re.Match) -> str:
+        content = match.group(1)
+        stripped = ASS_DIALOGUE_VISUAL_OVERRIDE_PATTERN.sub("", content)
+        return "" if not stripped else "{" + stripped + "}"
+
+    return ASS_OVERRIDE_BLOCK_PATTERN.sub(replace_block, text)
+
 def _ass_style_name_is_dialogue(value: str) -> bool:
     style_name = _normalized_ass_style_name(value)
     return any(style_name.startswith(prefix) for prefix in DIALOGUE_STYLE_NAME_PREFIXES)
@@ -4033,7 +3894,7 @@ def _ass_script_playres_y(lines: list[str]) -> float:
                     return value
             except ValueError:
                 break
-    return SUBTITLE_STYLE_BASE_PLAYRES_Y
+    return SUBTITLE_REFERENCE_PLAYRES_Y
 
 
 def _format_ass_number(value: float) -> str:
@@ -4042,18 +3903,29 @@ def _format_ass_number(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
-def _ass_fixed_dialogue_style_values(playres_y: float, horizontal_scale: float = 100.0) -> dict[str, str]:
-    scale = max(0.1, float(playres_y) / SUBTITLE_STYLE_BASE_PLAYRES_Y)
+def _ass_fixed_dialogue_style_values(
+    playres_y: float,
+    horizontal_scale: float = 100.0,
+    style_name: str = "",
+    current_italic: str = "0",
+) -> dict[str, str]:
+    scale = max(0.1, float(playres_y) / SUBTITLE_REFERENCE_PLAYRES_Y)
+    normalized_name = _normalized_ass_style_name(style_name)
+    is_alt = "alt" in normalized_name
+    is_italic = " it" in f" {normalized_name} " or "italic" in normalized_name or current_italic.strip() == "-1"
     values = dict(SUBTITLE_STYLE_FIXED_FIELDS)
     values["scalex"] = _format_ass_number(max(50.0, min(150.0, float(horizontal_scale))))
+    values["italic"] = "-1" if is_italic else "0"
+    values["outlinecolour"] = SUBTITLE_REFERENCE_ALT_OUTLINE if is_alt else SUBTITLE_REFERENCE_DEFAULT_OUTLINE
+    values["backcolour"] = SUBTITLE_REFERENCE_ALT_BACK if is_alt else SUBTITLE_REFERENCE_DEFAULT_BACK
     values.update(
         {
-            "fontsize": _format_ass_number(SUBTITLE_STYLE_FONT_SIZE * scale),
-            "outline": _format_ass_number(SUBTITLE_STYLE_OUTLINE * scale),
-            "shadow": _format_ass_number(SUBTITLE_STYLE_SHADOW * scale),
-            "marginl": _format_ass_number(SUBTITLE_STYLE_MARGIN_LR * scale),
-            "marginr": _format_ass_number(SUBTITLE_STYLE_MARGIN_LR * scale),
-            "marginv": _format_ass_number(SUBTITLE_STYLE_MARGIN_V * scale),
+            "fontsize": _format_ass_number(SUBTITLE_REFERENCE_FONT_SIZE * scale),
+            "outline": _format_ass_number(SUBTITLE_REFERENCE_OUTLINE * scale),
+            "shadow": _format_ass_number(SUBTITLE_REFERENCE_SHADOW * scale),
+            "marginl": _format_ass_number(SUBTITLE_REFERENCE_MARGIN_LR * scale),
+            "marginr": _format_ass_number(SUBTITLE_REFERENCE_MARGIN_LR * scale),
+            "marginv": _format_ass_number(SUBTITLE_REFERENCE_MARGIN_V * scale),
         }
     )
     return values
@@ -4162,32 +4034,23 @@ def _sort_ass_event_lines(lines: list[str]) -> tuple[list[str], int]:
     return output, reordered_events
 
 
-def ensure_ass_cache_normalized(path: Path) -> None:
+
+def normalize_ass_dialogue_styles_in_place(
+    path: Path,
+    video: Optional[Path] = None,
+    ffprobe: Optional[str] = None,
+) -> bool:
     if path.suffix.casefold() not in {".ass", ".ssa"} or not path.is_file():
-        return
+        return False
     try:
         text, encoding = _read_subtitle_text(path)
-        if ASS_EVENT_SORT_MARKER in "\n".join(text.splitlines()[:40]):
-            return
-        lines = text.splitlines(keepends=True)
-        sorted_lines, reordered_events = _sort_ass_event_lines(lines)
-        path.write_text("".join(sorted_lines), encoding=encoding if encoding != "cp1252" else "utf-8")
-        diagnostic_log(
-            "subtitle.ass.cache_normalized",
-            path=diagnostic_path_summary(path),
-            encoding=encoding,
-            reordered_events=reordered_events,
-        )
     except OSError as error:
-        diagnostic_log("subtitle.ass.cache_normalize_error", path=str(path), error=repr(error))
-
-
-def rewrite_ass_dialogue_styles(source: Path, target: Path, horizontal_scale: float = 100.0) -> None:
-    text, encoding = _read_subtitle_text(source)
+        diagnostic_log("subtitle.ass.normalize_read_error", path=str(path), error=repr(error))
+        return False
     lines = text.splitlines(keepends=True)
     dialogue_fonts = _ass_dialogue_style_fonts(lines)
     playres_y = _ass_script_playres_y(lines)
-    fixed_style_values = _ass_fixed_dialogue_style_values(playres_y, horizontal_scale)
+    horizontal_scale = subtitle_horizontal_scale_for_video(video, ffprobe) if video is not None else 100.0
     output: list[str] = []
     in_styles = False
     format_fields: list[str] = []
@@ -4223,14 +4086,22 @@ def rewrite_ass_dialogue_styles(source: Path, target: Path, horizontal_scale: fl
             except ValueError:
                 output.append(line)
                 continue
-            required_length = max(name_index, font_index)
-            if len(parts) > required_length:
+            if len(parts) > max(name_index, font_index):
                 style_name_raw = parts[name_index].strip()
-                style_name = style_name_raw.casefold()
                 style_font = _normalized_ass_font_name(parts[font_index])
                 style_names.append(style_name_raw)
                 if _ass_style_name_is_dialogue(style_name_raw) or (style_font and style_font in dialogue_fonts):
-                    parts[font_index] = _replace_ass_field(parts[font_index], APP_FONT_FAMILY)
+                    current_italic = "0"
+                    if "italic" in format_fields:
+                        italic_index = format_fields.index("italic")
+                        if len(parts) > italic_index:
+                            current_italic = parts[italic_index]
+                    fixed_style_values = _ass_fixed_dialogue_style_values(
+                        playres_y,
+                        horizontal_scale,
+                        style_name=style_name_raw,
+                        current_italic=current_italic,
+                    )
                     for field_name, field_value in fixed_style_values.items():
                         if field_name not in format_fields:
                             continue
@@ -4241,421 +4112,195 @@ def rewrite_ass_dialogue_styles(source: Path, target: Path, horizontal_scale: fl
                     line = f"{prefix}:{','.join(parts)}{newline}"
         output.append(line)
     output, reordered_events = _sort_ass_event_lines(output)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("".join(output), encoding=encoding if encoding != "cp1252" else "utf-8")
+    normalized_text = "".join(output)
+    if normalized_text == text:
+        diagnostic_log(
+            "subtitle.ass.normalize.no_change",
+            path=diagnostic_path_summary(path),
+            playres_y=playres_y,
+            font=SUBTITLE_DIALOGUE_FONT_NAME,
+            styles=";".join(style_names[:24]) or "none",
+        )
+        return False
+    try:
+        path.write_text(normalized_text, encoding=encoding if encoding != "cp1252" else "utf-8")
+    except OSError as error:
+        diagnostic_log("subtitle.ass.normalize_write_error", path=str(path), error=repr(error))
+        return False
     diagnostic_log(
-        "subtitle.ass.rewrite",
-        source=diagnostic_path_summary(source),
-        target=diagnostic_path_summary(target),
+        "subtitle.ass.normalize",
+        path=diagnostic_path_summary(path),
         encoding=encoding,
-        font=APP_FONT_FAMILY,
+        font=SUBTITLE_DIALOGUE_FONT_NAME,
         dialogue_events=dialogue_events,
         reordered_events=reordered_events,
         styles=";".join(style_names[:24]) or "none",
         rewritten=";".join(rewritten_styles) or "none",
         dialogue_fonts=";".join(sorted(dialogue_fonts)) or "none",
         playres_y=playres_y,
-        fixed_size=fixed_style_values.get("fontsize", ""),
+        fixed_size=_ass_fixed_dialogue_style_values(playres_y).get("fontsize", ""),
         horizontal_scale=horizontal_scale,
     )
+    return True
 
 
-def cached_external_subtitle_for_movie(
-    movie: Movie, cache_dir: Path, create: bool = True, ffprobe: Optional[str] = None
-) -> Optional[Path]:
+def prepare_runtime_dialogue_subtitle(source: Path, video: Path, ffprobe: Optional[str] = None) -> Path:
+    if source.suffix.casefold() not in {".ass", ".ssa"} or not source.is_file():
+        return source
+    try:
+        text, encoding = _read_subtitle_text(source)
+    except OSError as error:
+        diagnostic_log("subtitle.runtime_style.read_error", source=str(source), error=repr(error))
+        return source
+
+    lines = text.splitlines(keepends=True)
+    playres_y = _ass_script_playres_y(lines)
+    horizontal_scale = subtitle_horizontal_scale_for_video(video, ffprobe)
+    output: list[str] = []
+    in_styles = False
+    in_events = False
+    style_format_fields: list[str] = []
+    event_format_fields: list[str] = []
+    target_style_names: set[str] = set()
+    rewritten_styles: list[str] = []
+    stripped_events = 0
+
+    for line in lines:
+        stripped = line.strip()
+        lower = stripped.casefold()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_styles = lower in {"[v4+ styles]", "[v4 styles]"}
+            in_events = lower == "[events]"
+            output.append(line)
+            continue
+
+        if in_styles and lower.startswith("format:"):
+            style_format_fields = [field.strip().casefold() for field in line.split(":", 1)[1].split(",")]
+            output.append(line)
+            continue
+
+        if in_events and lower.startswith("format:"):
+            event_format_fields = [field.strip().casefold() for field in line.split(":", 1)[1].split(",")]
+            output.append(line)
+            continue
+
+        if in_styles and lower.startswith("style:") and style_format_fields:
+            prefix, payload = line.split(":", 1)
+            newline = ""
+            if payload.endswith("\r\n"):
+                payload = payload[:-2]
+                newline = "\r\n"
+            elif payload.endswith("\n"):
+                payload = payload[:-1]
+                newline = "\n"
+            parts = payload.split(",", max(0, len(style_format_fields) - 1))
+            try:
+                name_index = style_format_fields.index("name")
+                font_index = style_format_fields.index("fontname")
+            except ValueError:
+                output.append(line)
+                continue
+            if len(parts) > max(name_index, font_index) and _ass_font_is_dordiewatch_dialogue(parts[font_index]):
+                style_name_raw = parts[name_index].strip()
+                target_style_names.add(_normalized_ass_style_name(style_name_raw))
+                current_italic = "0"
+                if "italic" in style_format_fields:
+                    italic_index = style_format_fields.index("italic")
+                    if len(parts) > italic_index:
+                        current_italic = parts[italic_index]
+                fixed_style_values = _ass_fixed_dialogue_style_values(
+                    playres_y,
+                    horizontal_scale,
+                    style_name=style_name_raw,
+                    current_italic=current_italic,
+                )
+                fixed_style_values["outlinecolour"] = SUBTITLE_REFERENCE_DEFAULT_OUTLINE
+                fixed_style_values["backcolour"] = SUBTITLE_REFERENCE_DEFAULT_BACK
+                for field_name, field_value in fixed_style_values.items():
+                    if field_name not in style_format_fields:
+                        continue
+                    field_index = style_format_fields.index(field_name)
+                    if len(parts) > field_index:
+                        parts[field_index] = _replace_ass_field(parts[field_index], field_value)
+                rewritten_styles.append(style_name_raw)
+                line = f"{prefix}:{','.join(parts)}{newline}"
+
+        elif in_events and lower.startswith("dialogue:") and event_format_fields and target_style_names:
+            prefix, payload = line.split(":", 1)
+            newline = ""
+            if payload.endswith("\r\n"):
+                payload = payload[:-2]
+                newline = "\r\n"
+            elif payload.endswith("\n"):
+                payload = payload[:-1]
+                newline = "\n"
+            parts = payload.split(",", max(0, len(event_format_fields) - 1))
+            try:
+                style_index = event_format_fields.index("style")
+                text_index = event_format_fields.index("text")
+            except ValueError:
+                output.append(line)
+                continue
+            if len(parts) > max(style_index, text_index) and _normalized_ass_style_name(parts[style_index]) in target_style_names:
+                cleaned_text = _strip_dialogue_visual_override_tags(parts[text_index])
+                if cleaned_text != parts[text_index]:
+                    parts[text_index] = cleaned_text
+                    stripped_events += 1
+                    line = f"{prefix}:{','.join(parts)}{newline}"
+
+        output.append(line)
+
+    if not target_style_names:
+        diagnostic_log("subtitle.runtime_style.no_target", source=diagnostic_path_summary(source))
+        return source
+
+    runtime_text = "".join(output)
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding=encoding if encoding != "cp1252" else "utf-8",
+            suffix=source.suffix,
+            prefix="dordiewatch-sub-",
+            delete=False,
+        ) as handle:
+            handle.write(runtime_text)
+            runtime_path = Path(handle.name)
+    except OSError as error:
+        diagnostic_log("subtitle.runtime_style.write_error", source=str(source), error=repr(error))
+        return source
+
+    SUBTITLE_RUNTIME_TEMP_FILES.add(runtime_path)
+    diagnostic_log(
+        "subtitle.runtime_style.prepared",
+        source=diagnostic_path_summary(source),
+        runtime=diagnostic_path_summary(runtime_path),
+        playres_y=playres_y,
+        fixed_size=_ass_fixed_dialogue_style_values(playres_y, horizontal_scale).get("fontsize", ""),
+        rewritten=";".join(rewritten_styles) or "none",
+        stripped_events=stripped_events,
+    )
+    return runtime_path
+
+def direct_external_subtitle_tracks_for_movie(movie: Movie, ffprobe: Optional[str] = None) -> list[tuple[str, str, str, str]]:
     source = external_subtitle_source_for_movie(movie)
     if source is None:
-        diagnostic_log("subtitle.external.cache.no_source", movie=movie.title, create=create)
-        return None
-    if source.suffix.casefold() not in {".ass", ".ssa"}:
         diagnostic_log(
-            "subtitle.external.cache.direct",
+            "subtitle.direct_external.none",
             movie=movie.title,
-            source=diagnostic_path_summary(source),
-            reason="not_ass_ssa",
-        )
-        return source
-    try:
-        stat = source.stat()
-        horizontal_scale = subtitle_horizontal_scale_for_video(Path(movie.path), ffprobe)
-        identity = f"external|{SUBTITLE_STYLE_CACHE_VERSION}|{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{APP_FONT_FAMILY}|sx={horizontal_scale:.4f}"
-    except OSError as error:
-        diagnostic_log("subtitle.external.cache.stat_error", movie=movie.title, source=str(source), error=repr(error))
-        return None
-    digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
-    target = cache_dir / f"{digest}{source.suffix.casefold()}"
-    if target.is_file():
-        ensure_ass_cache_normalized(target)
-        diagnostic_log(
-            "subtitle.external.cache.hit",
-            movie=movie.title,
-            source=diagnostic_path_summary(source),
-            target=diagnostic_path_summary(target),
-            digest=digest,
-        )
-        return target
-    if not create:
-        diagnostic_log(
-            "subtitle.external.cache.miss_use_source",
-            movie=movie.title,
-            source=diagnostic_path_summary(source),
-            target=str(target),
-            digest=digest,
-            reason="styled_cache_missing",
-        )
-        return source
-    try:
-        diagnostic_log(
-            "subtitle.external.cache.create",
-            movie=movie.title,
-            source=diagnostic_path_summary(source),
-            target=str(target),
-            digest=digest,
-        )
-        rewrite_ass_dialogue_styles(source, target, horizontal_scale=horizontal_scale)
-        return target
-    except OSError as error:
-        diagnostic_log("subtitle.cache.error", source=str(source), error=repr(error))
-        return source
-
-
-def subtitle_track_label_from_stream(stream: dict, fallback: str) -> str:
-    tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
-    title = safe_description(str(tags.get("title", ""))).strip()
-    lang = safe_description(str(tags.get("language", ""))).strip().upper()
-    codec = safe_description(str(stream.get("codec_name", ""))).strip().upper()
-    parts = [title, lang, codec]
-    label = " - ".join(part for part in parts if part and part != "UNKNOWN")
-    return label or fallback
-
-
-def probe_subtitle_streams(path: Path, ffprobe: Optional[str]) -> list[dict]:
-    if not ffprobe:
-        diagnostic_log("subtitle.probe.no_ffprobe", video=str(path))
-        return []
-    command = [
-        ffprobe,
-        "-v",
-        "error",
-        "-select_streams",
-        "s",
-        "-show_entries",
-        "stream=index,codec_name:stream_tags=title,language",
-        "-of",
-        "json",
-        str(path),
-    ]
-    try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=25,
-            **process_options(),
-        )
-        data = json.loads(result.stdout or "{}")
-        streams = [stream for stream in (data.get("streams") or []) if isinstance(stream, dict)]
-        diagnostic_log(
-            "subtitle.probe.result",
-            video=str(path),
-            returncode=result.returncode,
-            stream_count=len(streams),
-            streams=diagnostic_tracks_summary(streams),
-            stderr=(result.stderr or "").strip()[:500],
-        )
-        return streams
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError, json.JSONDecodeError) as error:
-        diagnostic_log("subtitle.probe.error", video=str(path), error=repr(error))
-        return []
-
-
-def cached_embedded_subtitles_for_movie(
-    movie: Movie,
-    cache_dir: Path,
-    ffprobe: Optional[str],
-    ffmpeg: Optional[str],
-    create: bool = True,
-) -> list[tuple[Path, str, str]]:
-    if not ffmpeg or not ffprobe:
-        diagnostic_log(
-            "subtitle.embedded.tools_missing",
-            movie=movie.title,
-            ffprobe=bool(ffprobe),
-            ffmpeg=bool(ffmpeg),
-            create=create,
+            video=str(movie.path),
+            external_folder=movie_has_external_subtitle_folder(movie),
         )
         return []
-    video = Path(movie.path)
-    try:
-        stat = video.stat()
-    except OSError as error:
-        diagnostic_log("subtitle.embedded.video_stat_error", movie=movie.title, video=str(video), error=repr(error))
-        return []
-    tracks: list[tuple[Path, str, str]] = []
-    horizontal_scale = subtitle_horizontal_scale_for_video(video, ffprobe)
-    streams = probe_subtitle_streams(video, ffprobe)
+    runtime_source = prepare_runtime_dialogue_subtitle(source, Path(movie.path), ffprobe)
     diagnostic_log(
-        "subtitle.embedded.scan",
-        movie=movie.title,
-        video=str(video),
-        create=create,
-        stream_count=len(streams),
-    )
-    for stream in streams:
-        codec = safe_description(str(stream.get("codec_name", ""))).casefold()
-        extension = SUBTITLE_CODEC_EXTENSIONS.get(codec)
-        if not extension:
-            diagnostic_log(
-                "subtitle.embedded.unsupported_codec",
-                movie=movie.title,
-                stream=stream.get("index"),
-                codec=codec,
-            )
-            continue
-        try:
-            stream_index = int(stream.get("index"))
-        except (TypeError, ValueError):
-            diagnostic_log("subtitle.embedded.bad_stream_index", movie=movie.title, stream=stream)
-            continue
-        label = subtitle_track_label_from_stream(stream, f"Subtitle {len(tracks) + 1}")
-        language = safe_description(str((stream.get("tags") or {}).get("language", ""))).strip()
-        identity = (
-            f"embedded|{SUBTITLE_STYLE_CACHE_VERSION}|{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|"
-            f"{stream_index}|{codec}|{APP_FONT_FAMILY}|sx={horizontal_scale:.4f}"
-        )
-        digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
-        raw_target = cache_dir / f"{digest}.raw{extension}"
-        final_target = cache_dir / f"{digest}{extension}"
-        if final_target.is_file():
-            ensure_ass_cache_normalized(final_target)
-            diagnostic_log(
-                "subtitle.embedded.cache.hit",
-                movie=movie.title,
-                stream=stream_index,
-                codec=codec,
-                label=label,
-                language=language,
-                target=diagnostic_path_summary(final_target),
-                digest=digest,
-            )
-        else:
-            if not create:
-                diagnostic_log(
-                    "subtitle.embedded.cache.miss_no_create",
-                    movie=movie.title,
-                    stream=stream_index,
-                    codec=codec,
-                    label=label,
-                    target=str(final_target),
-                    digest=digest,
-                )
-                continue
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            command = [
-                ffmpeg,
-                "-y",
-                "-v",
-                "error",
-                "-i",
-                str(video),
-                "-map",
-                f"0:{stream_index}",
-                "-c:s",
-                "copy",
-                str(raw_target),
-            ]
-            try:
-                diagnostic_log(
-                    "subtitle.embedded.extract.start",
-                    movie=movie.title,
-                    stream=stream_index,
-                    codec=codec,
-                    label=label,
-                    raw=str(raw_target),
-                    final=str(final_target),
-                )
-                result = subprocess.run(
-                    command,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=45,
-                    **process_options(),
-                )
-                if result.returncode != 0 or not raw_target.is_file():
-                    diagnostic_log(
-                        "subtitle.embedded.extract.failed",
-                        video=str(video),
-                        stream=stream_index,
-                        error=(result.stderr or "").strip()[:500],
-                    )
-                    continue
-                if extension in {".ass", ".ssa"}:
-                    rewrite_ass_dialogue_styles(raw_target, final_target, horizontal_scale=horizontal_scale)
-                else:
-                    raw_target.replace(final_target)
-                diagnostic_log(
-                    "subtitle.embedded.extract.done",
-                    movie=movie.title,
-                    stream=stream_index,
-                    target=diagnostic_path_summary(final_target),
-                )
-            except (OSError, subprocess.SubprocessError) as error:
-                diagnostic_log(
-                    "subtitle.embedded.extract.error",
-                    video=str(video),
-                    stream=stream_index,
-                    error=repr(error),
-                )
-                continue
-            finally:
-                if raw_target.is_file() and raw_target != final_target:
-                    try:
-                        raw_target.unlink()
-                    except OSError:
-                        pass
-        if final_target.is_file():
-            tracks.append((final_target, label, language))
-    diagnostic_log(
-        "subtitle.embedded.scan.done",
-        movie=movie.title,
-        create=create,
-        track_count=len(tracks),
-        tracks="; ".join(f"{label}|{language}|{path.name}" for path, label, language in tracks),
-    )
-    return tracks
-
-
-def cached_subtitle_tracks_for_movie(
-    movie: Movie,
-    cache_dir: Path,
-    ffprobe: Optional[str],
-    ffmpeg: Optional[str],
-    create: bool = False,
-) -> list[tuple[str, str, str, str]]:
-    diagnostic_log(
-        "subtitle.cache.tracks.start",
+        "subtitle.direct_external.use",
         movie=movie.title,
         video=str(movie.path),
-        cache_dir=str(cache_dir),
-        create=create,
+        source=diagnostic_path_summary(source),
+        runtime_source=diagnostic_path_summary(runtime_source),
     )
-    tracks: list[tuple[str, str, str, str]] = []
-    external_subtitle = cached_external_subtitle_for_movie(movie, cache_dir, create=create, ffprobe=ffprobe)
-    if external_subtitle is not None:
-        tracks.append((str(external_subtitle), "English", "eng", "external"))
-        diagnostic_log(
-            "subtitle.cache.external_priority",
-            movie=movie.title,
-            video=str(movie.path),
-            track=diagnostic_path_summary(external_subtitle),
-        )
-    elif movie_has_external_subtitle_folder(movie):
-        diagnostic_log(
-            "subtitle.cache.external_priority.no_match",
-            movie=movie.title,
-            video=str(movie.path),
-            reason="external_subtitle_folder_exists",
-        )
-    else:
-        for subtitle_path, label, language in cached_embedded_subtitles_for_movie(
-            movie, cache_dir, ffprobe, ffmpeg, create=create
-        ):
-            tracks.append((str(subtitle_path), label, language, "embedded"))
-    diagnostic_log(
-        "subtitle.cache.tracks.done",
-        movie=movie.title,
-        create=create,
-        count=len(tracks),
-        tracks="; ".join(
-            f"{source}|{label}|{language}|{diagnostic_path_summary(path)}"
-            for path, label, language, source in tracks
-        ) or "none",
-    )
-    return tracks
+    return [(str(runtime_source), "English", "eng", "external")]
 
-
-def subtitle_cache_readiness_for_movie(
-    movie: Movie,
-    cache_dir: Path,
-    ffprobe: Optional[str],
-    ffmpeg: Optional[str],
-) -> tuple[int, int]:
-    expected = 0
-    ready = 0
-    source = external_subtitle_source_for_movie(movie)
-    external_folder_exists = source is not None or movie_has_external_subtitle_folder(movie)
-    if source is not None:
-        expected += 1
-        if source.suffix.casefold() not in {".ass", ".ssa"}:
-            ready += 1
-        else:
-            try:
-                stat = source.stat()
-                horizontal_scale = subtitle_horizontal_scale_for_video(Path(movie.path), ffprobe)
-                identity = (
-                    f"external|{SUBTITLE_STYLE_CACHE_VERSION}|{source.resolve()}|"
-                    f"{stat.st_size}|{stat.st_mtime_ns}|{APP_FONT_FAMILY}|sx={horizontal_scale:.4f}"
-                )
-                digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
-                if (cache_dir / f"{digest}{source.suffix.casefold()}").is_file():
-                    ready += 1
-            except OSError:
-                pass
-        diagnostic_log(
-            "subtitle.cache.readiness",
-            movie=movie.title,
-            expected=expected,
-            ready=ready,
-            mode="external_priority",
-        )
-        return expected, ready
-    if external_folder_exists:
-        diagnostic_log(
-            "subtitle.cache.readiness",
-            movie=movie.title,
-            expected=expected,
-            ready=ready,
-            mode="external_priority_no_match",
-        )
-        return expected, ready
-    if not ffmpeg or not ffprobe:
-        return expected, ready
-    video = Path(movie.path)
-    try:
-        stat = video.stat()
-    except OSError:
-        return expected, ready
-    horizontal_scale = subtitle_horizontal_scale_for_video(video, ffprobe)
-    for stream in probe_subtitle_streams(video, ffprobe):
-        codec = safe_description(str(stream.get("codec_name", ""))).casefold()
-        extension = SUBTITLE_CODEC_EXTENSIONS.get(codec)
-        if not extension:
-            continue
-        try:
-            stream_index = int(stream.get("index"))
-        except (TypeError, ValueError):
-            continue
-        expected += 1
-        identity = (
-            f"embedded|{SUBTITLE_STYLE_CACHE_VERSION}|{video.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|"
-            f"{stream_index}|{codec}|{APP_FONT_FAMILY}|sx={horizontal_scale:.4f}"
-        )
-        digest = hashlib.sha1(identity.encode("utf-8", errors="replace")).hexdigest()
-        if (cache_dir / f"{digest}{extension}").is_file():
-            ready += 1
-    diagnostic_log(
-        "subtitle.cache.readiness",
-        movie=movie.title,
-        expected=expected,
-        ready=ready,
-    )
-    return expected, ready
 
 
 class MpvVideoSurface(QOpenGLWidget):
@@ -5161,6 +4806,9 @@ class MpvController(QObject):
                     "hwdec": "auto-safe",
                     "sub_auto": "no",
                     "sub_ass_override": "no",
+                    "sub_ass_scale_with_window": "yes",
+                    "sub_scale_with_window": "yes",
+                    "sub_scale_by_window": "yes",
                     "audio_display": "no",
                     "keep_open": False,
                 }
@@ -5289,8 +4937,18 @@ class MpvController(QObject):
             defer_autoplay_for_subtitles = bool(autoplay and managed_subtitles)
             self.player.volume = max(0, min(100, int(volume)))
             self.player.mute = False
+            if self._using_managed_subtitles:
+                try:
+                    self.player.command("set", "sid", "no")
+                except Exception:
+                    pass
             self.player.pause = True if defer_autoplay_for_subtitles else not autoplay
             self.player.command("loadfile", str(path), "replace")
+            if self._using_managed_subtitles and not managed_subtitles:
+                try:
+                    self.player.command("set", "sid", "no")
+                except Exception:
+                    pass
             self.player.pause = True if defer_autoplay_for_subtitles else not autoplay
             self._schedule_subtitle_state_logs(generation, "mpv.subtitle.state.after_open")
             if managed_subtitles:
@@ -7044,16 +6702,10 @@ class PlayerPage(QWidget):
         saved_progress = 0 if movie.completed else max(0, int(movie.progress_ms or 0))
         start_position = max(0, int(start_ms)) if start_ms is not None else saved_progress
         self.timeline.setValue(start_position)
-        subtitle_tracks = cached_subtitle_tracks_for_movie(
-            movie,
-            self.store.subtitle_cache_dir,
-            self.ffprobe,
-            self.ffmpeg,
-            create=False,
-        )
-        external_subtitle_mode = bool(subtitle_tracks) or movie_has_external_subtitle_folder(movie)
+        subtitle_tracks = direct_external_subtitle_tracks_for_movie(movie, self.ffprobe)
+        external_subtitle_mode = True
         diagnostic_log(
-            "player.subtitle.cached_tracks",
+            "player.subtitle.direct_external_tracks",
             title=movie.title,
             count=len(subtitle_tracks),
             preference_key=self._subtitle_preference_key(),
@@ -8577,13 +8229,6 @@ class DordieWatchWindow(QMainWindow):
         self.scan_task: Optional[LibraryScanTask] = None
         self.preview_task: Optional[PreviewGenerationTask] = None
         self.preview_task_key = ""
-        self.subtitle_cache_task: Optional[SubtitleCacheTask] = None
-        self.subtitle_cache_task_key = ""
-        self.subtitle_cache_token = 0
-        ready_setting = self.settings.get("subtitle_cache_ready", {})
-        self.subtitle_cache_ready_keys: set[str] = {
-            str(key) for key, value in ready_setting.items() if value
-        } if isinstance(ready_setting, dict) else set()
         self.scan_token = 0
         self.scan_progress_map: dict[str, tuple[int, float, bool]] = {}
         self.scan_seen_paths: set[str] = set()
@@ -9008,11 +8653,6 @@ class DordieWatchWindow(QMainWindow):
         )
         if updated is not None:
             dialog.set_collection(updated)
-            if (
-                self.subtitle_cache_task is not None
-                and self.subtitle_cache_task_key == updated.folder
-            ):
-                dialog.set_subtitle_cache_busy(True, "Caching...")
 
     def scan_folder(self, folder: Path) -> None:
         if not folder.is_dir():
@@ -9316,13 +8956,6 @@ class DordieWatchWindow(QMainWindow):
         dialog = SeriesDetailsDialog(collection, self, origin_geometry)
         self.series_dialog = dialog
         dialog.movie_activated.connect(self.play_movie)
-        dialog.subtitle_cache_requested.connect(self.cache_subtitles_for_collection)
-        if self.subtitle_cache_task_key == collection.folder and self.subtitle_cache_task is not None:
-            dialog.set_subtitle_cache_busy(True, "Caching...")
-        elif self._subtitle_cache_is_ready(collection.folder):
-            dialog.set_subtitle_cache_ready(True, "Recache")
-        else:
-            dialog.set_subtitle_cache_ready(False, "Cache Subtitles")
         dialog.finished.connect(
             lambda *_args, active=dialog: self._clear_series_dialog(active)
         )
@@ -9335,132 +8968,8 @@ class DordieWatchWindow(QMainWindow):
             not self.scan_task
             and not self.website_task
             and not self.website_library_task
-            and not self.subtitle_cache_task
         ):
             self.home.set_scanning(None)
-
-    def _subtitle_cache_flags(self) -> dict:
-        flags = self.settings.get("subtitle_cache_ready")
-        if not isinstance(flags, dict):
-            flags = {}
-            self.settings["subtitle_cache_ready"] = flags
-        return flags
-
-    def _subtitle_cache_is_ready(self, key: str) -> bool:
-        key = str(key)
-        return key in self.subtitle_cache_ready_keys or bool(self._subtitle_cache_flags().get(key))
-
-    def _set_subtitle_cache_ready_flag(self, key: str, ready: bool, save: bool = True) -> None:
-        key = str(key)
-        flags = self._subtitle_cache_flags()
-        if ready:
-            self.subtitle_cache_ready_keys.add(key)
-            flags[key] = True
-        else:
-            self.subtitle_cache_ready_keys.discard(key)
-            flags.pop(key, None)
-        if save:
-            self.save_library()
-
-    def _start_subtitle_cache_status_check(self, collection: LibraryCollection) -> None:
-        if not collection.movies:
-            return
-        self.subtitle_cache_status_token += 1
-        token = self.subtitle_cache_status_token
-        task = SubtitleCacheStatusTask(collection.movies, self.store, collection.folder)
-        self.subtitle_cache_status_task = task
-        task.signals.finished.connect(
-            lambda payload, active=token: self._subtitle_cache_status_finished(active, payload)
-        )
-        QThreadPool.globalInstance().start(task.runnable)
-
-    def _subtitle_cache_status_finished(self, token: int, payload: dict) -> None:
-        if token != self.subtitle_cache_status_token:
-            return
-        self.subtitle_cache_status_task = None
-        key = str(payload.get("key") or "")
-        expected = int(payload.get("expected") or 0)
-        ready = int(payload.get("ready") or 0)
-        is_ready = expected > 0 and ready >= expected
-        if is_ready:
-            self._set_subtitle_cache_ready_flag(key, True)
-        else:
-            self._set_subtitle_cache_ready_flag(key, False)
-        dialog = self.series_dialog
-        if dialog is not None and dialog.collection.folder == key:
-            dialog.set_subtitle_cache_ready(is_ready, "Recache" if is_ready else "Cache Subtitles")
-
-    def cache_subtitles_for_collection(self, collection: LibraryCollection) -> None:
-        if not collection.movies:
-            return
-
-        if self.subtitle_cache_task is not None:
-            dialog = self.series_dialog
-            if dialog is not None and dialog.collection.folder == collection.folder:
-                dialog.set_subtitle_cache_busy(True, "Caching...")
-            return
-        self.subtitle_cache_token += 1
-        token = self.subtitle_cache_token
-        task = SubtitleCacheTask(collection.movies, self.store, collection.folder)
-        self.subtitle_cache_task = task
-        self.subtitle_cache_task_key = collection.folder
-        dialog = self.series_dialog
-        if dialog is not None and dialog.collection.folder == collection.folder:
-            dialog.set_subtitle_cache_busy(True, "Checking...")
-        task.signals.progress.connect(
-            lambda current, total, title, active=token: self._subtitle_cache_progress(
-                active, current, total, title
-            )
-        )
-        task.signals.finished.connect(
-            lambda payload, active=token: self._subtitle_cache_finished(active, payload)
-        )
-        task.signals.failed.connect(
-            lambda message, active=token: self._subtitle_cache_failed(active, message)
-        )
-        QThreadPool.globalInstance().start(task.runnable)
-
-    def _subtitle_cache_progress(
-        self, token: int, current: int, total: int, title: str
-    ) -> None:
-        if token != self.subtitle_cache_token:
-            return
-        dialog = self.series_dialog
-        if dialog is not None and dialog.collection.folder == self.subtitle_cache_task_key:
-            dialog.set_subtitle_cache_busy(True, f"Caching {current}/{total}")
-
-    def _subtitle_cache_finished(self, token: int, payload: dict) -> None:
-        if token != self.subtitle_cache_token:
-            return
-        self.subtitle_cache_task = None
-        key = str(payload.get("key") or "")
-        tracks = int(payload.get("tracks") or 0)
-        videos = int(payload.get("videos") or 0)
-        created = int(payload.get("created") or 0)
-        if tracks <= 0:
-            message = "No Subtitles"
-            self._set_subtitle_cache_ready_flag(key, False)
-        else:
-            message = "Recache"
-            self._set_subtitle_cache_ready_flag(key, True)
-        dialog = self.series_dialog
-        if dialog is not None and dialog.collection.folder == key:
-            if tracks <= 0:
-                dialog.set_subtitle_cache_ready(False, message)
-            else:
-                dialog.set_subtitle_cache_ready(True, message)
-        self.subtitle_cache_task_key = ""
-        self._set_home_activity_idle_if_possible()
-
-    def _subtitle_cache_failed(self, token: int, message: str) -> None:
-        if token != self.subtitle_cache_token:
-            return
-        self.subtitle_cache_task = None
-        dialog = self.series_dialog
-        if dialog is not None and dialog.collection.folder == self.subtitle_cache_task_key:
-            dialog.set_subtitle_cache_busy(False, "Cache Failed")
-        self.subtitle_cache_task_key = ""
-        self._set_home_activity_idle_if_possible()
 
     def start_series_preview_generation(self, collection: LibraryCollection) -> None:
         if not collection.movies:
@@ -9796,8 +9305,6 @@ class DordieWatchWindow(QMainWindow):
             self.scan_task.cancel()
         if self.preview_task:
             self.preview_task.cancel()
-        if self.subtitle_cache_task:
-            self.subtitle_cache_task.cancel()
         if self.pages.currentWidget() is self.player and self.player.movie:
             self.close_after_player = True
             event.ignore()
@@ -9899,23 +9406,6 @@ QMainWindow, QStackedWidget, #homeContent, #homeScroll,
 }
 #seriesPlay:hover {
     background: #dcdcdc;
-}
-#seriesCacheButton {
-    background: rgba(255, 255, 255, 0.12);
-    color: #ffffff;
-    border: 1px solid rgba(255, 255, 255, 0.42);
-    border-radius: 4px;
-    padding: 9px 14px;
-    font-size: 14px;
-    font-weight: 800;
-}
-#seriesCacheButton:hover {
-    background: rgba(255, 255, 255, 0.18);
-}
-#seriesCacheButton:disabled {
-    color: #bdbdbd;
-    border-color: rgba(255, 255, 255, 0.25);
-    background: rgba(255, 255, 255, 0.08);
 }
 
 #seriesEpisodesHeading {
