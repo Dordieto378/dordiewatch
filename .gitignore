@@ -1,40 +1,35 @@
-__pycache__/
-*.py[cod]
-build/
-dist/
-*.spec
-.agents/
-.codex/
-.pytest_cache/
+# Build output
+bin/
+obj/
+publish/
+**/bin/
+**/obj/
 
-# Local media library - never commit actual videos.
-videos/*
-!videos/.gitkeep
+# Local video libraries - never commit media files
+videos/
+**/videos/
 *.mkv
 *.mp4
 *.avi
 *.mov
 *.webm
-*.wmv
-*.flv
 *.m4v
-*.ts
-*.m2ts
 
-# Generated/extracted subtitle cache.
-subtitles/
-*.ass.tmp
+# Subtitle files can contain downloaded/private media metadata; keep local by default
+*.ass
+*.ssa
+*.srt
 
-# Local binary runtime/dependency payloads.
-runtime/
-vendor/
-*.dll
-*.exe
-
-# Local/private font files. The app no longer needs this folder.
-font/
-
-# Local environment/log noise.
-.env
-.env.*
+# App/runtime caches
+.tmp_reference_frames/
 *.log
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE/user-local files
+.vs/
+.idea/
+*.user
+*.suo
+*.rsuser

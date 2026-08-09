@@ -1,0 +1,14 @@
+<Window
+    x:Class="DordieWatch.App.Views.MainWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:DordieWatch.App.ViewModels"
+    x:DataType="vm:MainWindowViewModel"
+    Title="DordieWatch"
+    Width="1280"
+    Height="760"
+    MinWidth="900"
+    MinHeight="560"
+    Background="#050505">
+  <ContentControl Content="{Binding CurrentViewModel}" />
+</Window>
