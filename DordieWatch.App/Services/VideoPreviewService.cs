@@ -6,6 +6,7 @@ namespace DordieWatch.App.Services;
 
 public sealed class VideoPreviewService(IAppPaths paths) : IVideoPreviewService
 {
+    private static readonly SemaphoreSlim FfmpegGate = new(1, 1);
     private readonly string? _ffmpegPath = ResolveFfmpegPath();
 
     public Task<EpisodePreview> EnsurePreviewAsync(string videoPath, CancellationToken cancellationToken)
@@ -30,37 +31,32 @@ public sealed class VideoPreviewService(IAppPaths paths) : IVideoPreviewService
             .Select(index => Path.Combine(outputDirectory, $"preview-{index:00}.jpg"))
             .ToArray();
 
-        if (File.Exists(thumbnail) && frames.Count(File.Exists) >= 2)
+        if (File.Exists(thumbnail) && frames.All(File.Exists))
         {
             return new EpisodePreview(thumbnail, frames.Where(File.Exists).ToArray());
         }
 
-        var seekSeconds = new[] { 20, 60, 120, 240, 360, 480 };
-        var createdFrames = new List<string>();
-        for (var index = 0; index < seekSeconds.Length; index++)
+        for (var index = 0; index < frames.Length; index++)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             var frame = frames[index];
             if (File.Exists(frame))
             {
-                createdFrames.Add(frame);
                 continue;
             }
 
-            if (ExtractFrame(video.FullName, frame, seekSeconds[index], cancellationToken))
-            {
-                createdFrames.Add(frame);
-            }
+            cancellationToken.ThrowIfCancellationRequested();
+            ExtractFrame(video.FullName, frame, 30 + (index * 60), cancellationToken);
         }
 
-        if (createdFrames.Count > 0 && !File.Exists(thumbnail))
+        var firstFrame = frames.FirstOrDefault(File.Exists);
+        if (File.Exists(firstFrame) && !File.Exists(thumbnail))
         {
-            File.Copy(createdFrames[Math.Min(2, createdFrames.Count - 1)], thumbnail, overwrite: true);
+            File.Copy(firstFrame, thumbnail, overwrite: true);
         }
 
         return new EpisodePreview(
-            File.Exists(thumbnail) ? thumbnail : createdFrames.FirstOrDefault(),
-            createdFrames);
+            File.Exists(thumbnail) ? thumbnail : File.Exists(firstFrame) ? firstFrame : null,
+            frames.Where(File.Exists).ToArray());
     }
 
     private bool ExtractFrame(string videoPath, string outputPath, int seekSeconds, CancellationToken cancellationToken)
@@ -95,6 +91,7 @@ public sealed class VideoPreviewService(IAppPaths paths) : IVideoPreviewService
     {
         try
         {
+            FfmpegGate.Wait(cancellationToken);
             using var process = Process.Start(new ProcessStartInfo
             {
                 FileName = _ffmpegPath!,
@@ -109,7 +106,7 @@ public sealed class VideoPreviewService(IAppPaths paths) : IVideoPreviewService
                 return false;
             }
 
-            if (!process.WaitForExit(35_000))
+            if (!process.WaitForExit(12_000))
             {
                 try
                 {
@@ -129,6 +126,17 @@ public sealed class VideoPreviewService(IAppPaths paths) : IVideoPreviewService
         catch
         {
             return false;
+        }
+        finally
+        {
+            try
+            {
+                FfmpegGate.Release();
+            }
+            catch (SemaphoreFullException)
+            {
+                // The gate was not acquired.
+            }
         }
     }
 

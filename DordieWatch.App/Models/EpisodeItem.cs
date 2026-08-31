@@ -10,4 +10,5 @@ public sealed record EpisodeItem(
     string VideoPath,
     string? ExternalSubtitlePath,
     TimeSpan Duration,
-    TimeSpan Position);
+    TimeSpan Position,
+    DateTimeOffset? LastWatchedAt);

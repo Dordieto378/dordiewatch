@@ -1,0 +1,23 @@
+<Window
+    x:Class="DordieWatch.App.Views.FullscreenTransitionWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    WindowDecorations="None"
+    CanResize="False"
+    ShowInTaskbar="False"
+    ShowActivated="False"
+    Topmost="True"
+    Background="Transparent"
+    TransparencyLevelHint="Transparent">
+  <Border
+      x:Name="BlackoutLayer"
+      Background="#000000"
+      Opacity="0"
+      IsHitTestVisible="False">
+    <Border.Transitions>
+      <Transitions>
+        <DoubleTransition Property="Opacity" Duration="0:0:0.22" />
+      </Transitions>
+    </Border.Transitions>
+  </Border>
+</Window>

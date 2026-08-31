@@ -3,7 +3,7 @@
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:DordieWatch.App.ViewModels"
-    xmlns:vlc="using:LibVLCSharp.Avalonia"
+    x:Name="Root"
     x:DataType="vm:LibraryViewModel">
 
   <UserControl.Styles>
@@ -12,6 +12,30 @@
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="0" />
       <Setter Property="Cursor" Value="Hand" />
+    </Style>
+
+    <Style Selector="Button.clean:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <Style Selector="Button.clean:pressed /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <Style Selector="Button.episode:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <Style Selector="Button.episode:pressed /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <Style Selector="Button.episode Border.episodePlayOverlay">
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+
+    <Style Selector="Button.episode:pointerover Border.episodePlayOverlay">
+      <Setter Property="Opacity" Value="1" />
     </Style>
 
     <Style Selector="Button.icon">
@@ -52,18 +76,58 @@
       <Setter Property="Padding" Value="0" />
       <Setter Property="Cursor" Value="Hand" />
       <Setter Property="FontSize" Value="14" />
-      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="FontWeight" Value="Normal" />
     </Style>
 
     <Style Selector="Button.mediaTab:pointerover /template/ ContentPresenter">
       <Setter Property="Background" Value="Transparent" />
     </Style>
+
+    <Style Selector="Border.rangeButtonSurface">
+      <Setter Property="Background" Value="#242424" />
+      <Setter Property="BorderBrush" Value="#5A5A5A" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="3" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+
+    <Style Selector="Border.rangeButtonSurface:pointerover">
+      <Setter Property="Background" Value="#242424" />
+      <Setter Property="BorderBrush" Value="#5A5A5A" />
+    </Style>
+
+    <Style Selector="Border.rangeButtonSurface:pressed">
+      <Setter Property="Background" Value="#242424" />
+      <Setter Property="BorderBrush" Value="#5A5A5A" />
+    </Style>
+
+    <Style Selector="Border.rangeOptionSurface">
+      <Setter Property="Background" Value="#242424" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+
+    <Style Selector="Border.rangeOptionSurface:pointerover">
+      <Setter Property="Background" Value="#3A3A3A" />
+    </Style>
+
+    <Style Selector="Border.rangeOptionSurface:pressed">
+      <Setter Property="Background" Value="#3A3A3A" />
+    </Style>
   </UserControl.Styles>
 
-  <Grid Background="#050505">
+  <Grid Background="#000000" ClipToBounds="True">
+  <Grid
+      x:Name="LibrarySurface"
+      Background="#050505"
+      RenderTransformOrigin="50%,50%">
+    <Grid.RenderTransform>
+      <ScaleTransform ScaleX="1" ScaleY="1" />
+    </Grid.RenderTransform>
     <ScrollViewer HorizontalScrollBarVisibility="Disabled">
       <StackPanel Margin="38,94,38,46" Spacing="0">
-        <ItemsRepeater ItemsSource="{Binding Items}">
+        <ItemsRepeater
+            ItemsSource="{Binding Items}"
+            Margin="0,0,-204,0">
           <ItemsRepeater.Layout>
             <UniformGridLayout
                 MinItemWidth="204"
@@ -83,6 +147,7 @@
                   </Border>
 
                   <ProgressBar
+                      IsVisible="{Binding HasProgress}"
                       Grid.Row="0"
                       Value="{Binding Progress}"
                       Maximum="1"
@@ -95,7 +160,7 @@
                       Grid.Row="1"
                       Text="{Binding Title}"
                       FontSize="12"
-                      FontWeight="SemiBold"
+                      FontWeight="Normal"
                       TextTrimming="CharacterEllipsis"
                       Margin="0,7,0,0" />
                 </Grid>
@@ -109,7 +174,7 @@
     <Border
         Height="68"
         VerticalAlignment="Top"
-        Background="#00000000">
+        Background="#050505">
       <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="28,0,28,0">
         <TextBlock
             Grid.Column="0"
@@ -158,30 +223,34 @@
     <Grid
         x:Name="DetailsLayer"
         IsVisible="False"
-        Opacity="0">
-      <Button Classes="clean" Command="{Binding CloseDetailsCommand}" Background="#B2000000" />
+        PointerPressed="OnDetailsLayerPointerPressed">
+      <Border x:Name="DetailsBackdrop" Background="#B2000000" Opacity="0" />
 
       <ScrollViewer
           HorizontalScrollBarVisibility="Disabled"
-          VerticalScrollBarVisibility="Auto"
-          HorizontalAlignment="Center"
-          VerticalAlignment="Stretch"
-          Margin="0,28">
+          VerticalScrollBarVisibility="Auto">
+        <Grid Margin="0,28">
         <Border
             x:Name="DetailsPanel"
+            HorizontalAlignment="Center"
             Width="960"
             MinHeight="640"
             Background="#181818"
             CornerRadius="14"
             ClipToBounds="True"
-            RenderTransformOrigin="50%,50%">
-        <Border.RenderTransform>
-          <ScaleTransform ScaleX="0.965" ScaleY="0.965" />
-        </Border.RenderTransform>
-        <Grid RowDefinitions="430,*">
-          <Grid Grid.Row="0">
-            <Image Source="{Binding SelectedBackdrop}" Stretch="UniformToFill" />
-            <vlc:VideoView MediaPlayer="{Binding PreviewMediaPlayer}" />
+            UseLayoutRounding="True">
+        <Grid
+            x:Name="DetailsContent"
+            RowDefinitions="430,*"
+            Background="#181818"
+            ClipToBounds="True">
+          <Border x:Name="DetailsHeader" Grid.Row="0" ClipToBounds="True" Background="#181818">
+          <Grid>
+            <Image Source="{Binding SelectedBackdrop}" Stretch="UniformToFill" RenderTransformOrigin="50%,50%">
+              <Image.RenderTransform>
+                <ScaleTransform ScaleX="1.075" ScaleY="1.075" />
+              </Image.RenderTransform>
+            </Image>
             <Rectangle>
               <Rectangle.Fill>
                 <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
@@ -195,7 +264,17 @@
               <Rectangle.Fill>
                 <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
                   <GradientStop Color="#00000000" Offset="0" />
-                  <GradientStop Color="#30000000" Offset="0.55" />
+                  <GradientStop Color="#26000000" Offset="0.38" />
+                  <GradientStop Color="#B8181818" Offset="0.78" />
+                  <GradientStop Color="#181818" Offset="1" />
+                </LinearGradientBrush>
+              </Rectangle.Fill>
+            </Rectangle>
+            <Rectangle Height="150" VerticalAlignment="Bottom">
+              <Rectangle.Fill>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                  <GradientStop Color="#00181818" Offset="0" />
+                  <GradientStop Color="#E8181818" Offset="0.72" />
                   <GradientStop Color="#181818" Offset="1" />
                 </LinearGradientBrush>
               </Rectangle.Fill>
@@ -220,12 +299,16 @@
               <TextBlock
                   Text="{Binding SelectedTitle}"
                   FontSize="52"
-                  FontWeight="Bold"
+                  FontWeight="Normal"
                   TextTrimming="CharacterEllipsis"
-                  MaxWidth="760" />
+                  MaxWidth="760">
+                <TextBlock.RenderTransform>
+                  <TranslateTransform X="-58" Y="0" />
+                </TextBlock.RenderTransform>
+              </TextBlock>
 
               <Button
-                  Command="{Binding PlaySelectedCommand}"
+                  Click="OnPlaySelectedClick"
                   Background="#FFFFFF"
                   Foreground="#111111"
                   BorderThickness="0"
@@ -235,90 +318,155 @@
                 <StackPanel Orientation="Horizontal" Spacing="10">
                   <Path Fill="#111111" Width="20" Height="20" Stretch="Uniform"
                         Data="M 3 1 L 17 9 L 3 17 Z" />
-                  <TextBlock Text="Play" Foreground="#111111" FontWeight="Bold" FontSize="15" />
+                  <TextBlock Text="Play" Foreground="#111111" FontWeight="Normal" FontSize="15" />
                 </StackPanel>
               </Button>
 
-              <TextBlock
-                  Text="{Binding SelectedCountText}"
-                  IsVisible="{Binding IsSelectedSeries}"
-                  Foreground="#D4D4D4"
-                  FontSize="14"
-                  FontWeight="SemiBold" />
             </StackPanel>
           </Grid>
+          </Border>
 
           <Grid Grid.Row="1" IsVisible="{Binding IsSelectedSeries}" RowDefinitions="Auto,*" Margin="48,28,48,42">
             <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,16">
               <TextBlock
                   Text="Episodes"
                   FontSize="24"
-                  FontWeight="Bold"
+                  FontWeight="Normal"
                   VerticalAlignment="Center" />
 
-              <ComboBox
+              <Grid
                   Grid.Column="2"
                   IsVisible="{Binding HasEpisodeRanges}"
-                  ItemsSource="{Binding EpisodeRanges}"
-                  SelectedItem="{Binding SelectedEpisodeRange}"
                   Width="198"
-                  Height="42"
-                  Background="#242424"
-                  BorderBrush="#585858"
-                  BorderThickness="1"
-                  CornerRadius="3"
-                  Padding="12,0">
-                <ComboBox.ItemTemplate>
-                  <DataTemplate DataType="vm:EpisodeRangeViewModel">
-                    <TextBlock Text="{Binding Label}" FontSize="13" FontWeight="SemiBold" />
-                  </DataTemplate>
-                </ComboBox.ItemTemplate>
-              </ComboBox>
+                  Height="42">
+                <Border
+                    x:Name="EpisodeRangeButton"
+                    Classes="rangeButtonSurface"
+                    Width="198"
+                    Height="42"
+                    PointerPressed="OnEpisodeRangeButtonPointerPressed">
+                  <Grid ColumnDefinitions="*,Auto" Margin="14,0,18,0">
+                    <TextBlock
+                        Text="{Binding SelectedEpisodeRange.Label}"
+                        FontSize="15"
+                        FontWeight="Normal"
+                        VerticalAlignment="Center"
+                        TextTrimming="CharacterEllipsis" />
+                    <Grid Grid.Column="1" Width="18" Height="18" VerticalAlignment="Center" Margin="10,0,0,0">
+                      <Path
+                          Fill="#FFFFFF"
+                          Width="11"
+                          Height="8"
+                          Stretch="Uniform"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          IsVisible="{Binding IsEpisodeRangeDropdownClosed}"
+                          Data="M 0 0 L 12 0 L 6 8 Z" />
+                      <Path
+                          Fill="#FFFFFF"
+                          Width="11"
+                          Height="8"
+                          Stretch="Uniform"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          IsVisible="{Binding IsEpisodeRangeDropdownOpen}"
+                          Data="M 0 8 L 12 8 L 6 0 Z" />
+                    </Grid>
+                  </Grid>
+                </Border>
+
+                <Popup
+                    IsOpen="{Binding IsEpisodeRangeDropdownOpen, Mode=TwoWay}"
+                    PlacementTarget="{Binding #EpisodeRangeButton}"
+                    Placement="BottomEdgeAlignedLeft"
+                    VerticalOffset="2">
+                  <Border
+                      Width="198"
+                      Background="#242424"
+                      BorderBrush="#4F4F4F"
+                      BorderThickness="1">
+                    <ItemsControl ItemsSource="{Binding EpisodeRanges}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="vm:EpisodeRangeViewModel">
+                          <Border
+                              Classes="rangeOptionSurface"
+                              Height="42"
+                              Tag="{Binding}"
+                              PointerPressed="OnEpisodeRangeOptionPointerPressed">
+                            <TextBlock
+                                Text="{Binding Label}"
+                                Foreground="#FFFFFF"
+                                FontSize="14"
+                                FontWeight="Normal"
+                                VerticalAlignment="Center"
+                                Margin="14,0" />
+                          </Border>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </Border>
+                </Popup>
+              </Grid>
             </Grid>
 
             <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled">
               <ItemsControl ItemsSource="{Binding SelectedEpisodes}">
                 <ItemsControl.ItemTemplate>
                   <DataTemplate DataType="vm:EpisodeCardViewModel">
-                    <Button Classes="clean" Command="{Binding PlayCommand}" HorizontalAlignment="Stretch">
-                      <Grid Height="124" ColumnDefinitions="60,150,*,96">
-                        <TextBlock
-                            Grid.Column="0"
-                            Text="{Binding Number}"
-                            FontSize="20"
-                            Foreground="#E4E4E4"
-                            HorizontalAlignment="Center"
-                            VerticalAlignment="Center" />
+                    <Button
+                        Classes="clean episode"
+                        Tag="{Binding}"
+                        Click="OnEpisodePlayClick"
+                        HorizontalAlignment="Stretch">
+                      <Border Background="{Binding RowBackground}" BorderBrush="#363636" BorderThickness="0,0,0,1">
+                        <Grid Height="132" ColumnDefinitions="60,150,*,96">
+                          <TextBlock
+                              Grid.Column="0"
+                              Text="{Binding Number}"
+                              FontSize="24"
+                              Foreground="#DCDCDC"
+                              HorizontalAlignment="Center"
+                              VerticalAlignment="Center" />
 
-                        <Border Grid.Column="1" Width="150" Height="84" CornerRadius="4" ClipToBounds="True" Background="#111111">
-                          <Grid>
-                            <Image Source="{Binding Thumbnail}" Stretch="UniformToFill" />
-                            <ProgressBar
-                                Value="{Binding Progress}"
-                                Maximum="1"
-                                Height="4"
-                                VerticalAlignment="Bottom"
-                                Foreground="#E50914"
-                                Background="#5A5A5A" />
-                          </Grid>
-                        </Border>
+                          <Border Grid.Column="1" Width="150" Height="84" CornerRadius="4" ClipToBounds="True" Background="#111111">
+                            <Grid>
+                              <Image Source="{Binding Thumbnail}" Stretch="UniformToFill" />
+                              <Border Classes="episodePlayOverlay" Background="#26000000">
+                                <Grid HorizontalAlignment="Center" VerticalAlignment="Center" Width="54" Height="54">
+                                  <Ellipse Stroke="#F5FFFFFF" StrokeThickness="1.7" Fill="#22000000" />
+                                  <Viewbox Width="22" Height="22" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="3,0,0,0">
+                                    <Path Fill="#FFFFFF" Stretch="Uniform"
+                                          Data="M 0 0 L 18 11 L 0 22 Z" />
+                                  </Viewbox>
+                                </Grid>
+                              </Border>
+                              <ProgressBar
+                                  IsVisible="{Binding HasProgress}"
+                                  Value="{Binding Progress}"
+                                  Maximum="1"
+                                  Height="4"
+                                  VerticalAlignment="Bottom"
+                                  Foreground="#E50914"
+                                  Background="#5A5A5A" />
+                            </Grid>
+                          </Border>
 
-                        <TextBlock
-                            Grid.Column="2"
-                            Text="{Binding Title}"
-                            FontSize="15"
-                            FontWeight="Bold"
-                            Margin="18,0"
-                            VerticalAlignment="Center" />
+                          <StackPanel Grid.Column="2" Margin="18,0,12,0" VerticalAlignment="Center" Spacing="7">
+                            <TextBlock
+                                Text="{Binding Title}"
+                                FontSize="16"
+                                FontWeight="Normal" />
+                          </StackPanel>
 
-                        <TextBlock
-                            Grid.Column="3"
-                            Text="{Binding RuntimeText}"
-                            FontSize="14"
-                            FontWeight="Bold"
-                            HorizontalAlignment="Right"
-                            VerticalAlignment="Center" />
-                      </Grid>
+                          <TextBlock
+                              Grid.Column="3"
+                              Text="{Binding RuntimeText}"
+                              FontSize="16"
+                              FontWeight="Normal"
+                              HorizontalAlignment="Center"
+                              VerticalAlignment="Center" />
+                        </Grid>
+                      </Border>
                     </Button>
                   </DataTemplate>
                 </ItemsControl.ItemTemplate>
@@ -327,7 +475,33 @@
           </Grid>
         </Grid>
       </Border>
+        <Grid
+            x:Name="DetailsTransitionVisual"
+            ZIndex="1"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Top"
+            IsVisible="False"
+            IsHitTestVisible="False"
+            RenderTransformOrigin="50%,50%">
+          <Grid.RenderTransform>
+            <ScaleTransform ScaleX="0.965" ScaleY="0.965" />
+          </Grid.RenderTransform>
+          <Border Background="#181818" CornerRadius="14" />
+          <Image
+              x:Name="DetailsTransitionSnapshot"
+              Stretch="Fill"
+              Opacity="0" />
+        </Grid>
+        </Grid>
       </ScrollViewer>
     </Grid>
+  </Grid>
+
+  <Border
+      x:Name="PlaybackTransitionLayer"
+      ZIndex="100"
+      Background="#000000"
+      Opacity="0"
+      IsHitTestVisible="False" />
   </Grid>
 </UserControl>

@@ -9,4 +9,8 @@ public interface IAppPaths
     string WebsiteCoverDirectory { get; }
     string PreviewCacheDirectory { get; }
     string DordieListLibraryUrl { get; }
+    string DordieListConfigUrl { get; }
+    bool TrySetDordieListLibraryUrl(string value);
+    bool IsAllowedDordieListLibraryUrl(string value);
+    bool IsAllowedDordieListMediaUrl(string value);
 }

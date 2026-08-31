@@ -1,5 +1,6 @@
 using DordieWatch.App.Models;
 using DordieWatch.App.ViewModels;
+using Avalonia.Threading;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DordieWatch.App.Services;
@@ -18,6 +19,18 @@ public sealed class NavigationService(
         _ = viewModel.LoadAsync(CancellationToken.None);
     }
 
+    public async Task ShowMediaDetailsAsync(MediaLibraryItem mediaItem, CancellationToken cancellationToken)
+    {
+        var viewModel = serviceProvider.GetRequiredService<LibraryViewModel>();
+        SetCurrent(viewModel);
+        await Dispatcher.UIThread.InvokeAsync(
+            () => { },
+            DispatcherPriority.Render,
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        await viewModel.OpenDetailsForMediaAsync(mediaItem, cancellationToken);
+    }
+
     public async Task PlayMediaAsync(MediaLibraryItem mediaItem, CancellationToken cancellationToken)
     {
         var episodes = await libraryService.GetEpisodesAsync(mediaItem.Id, cancellationToken);
@@ -29,12 +42,16 @@ public sealed class NavigationService(
         }
     }
 
-    public Task PlayEpisodeAsync(EpisodeItem episode, CancellationToken cancellationToken)
+    public async Task PlayEpisodeAsync(EpisodeItem episode, CancellationToken cancellationToken)
     {
         var viewModel = serviceProvider.GetRequiredService<PlayerViewModel>();
-        viewModel.Open(episode);
         SetCurrent(viewModel);
-        return Task.CompletedTask;
+        await Dispatcher.UIThread.InvokeAsync(
+            () => { },
+            DispatcherPriority.Render,
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        viewModel.Open(episode);
     }
 
     private void SetCurrent(object? viewModel)

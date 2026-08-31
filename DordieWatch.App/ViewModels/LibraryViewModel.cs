@@ -3,7 +3,6 @@ using CommunityToolkit.Mvvm.Input;
 using Avalonia.Media.Imaging;
 using DordieWatch.App.Models;
 using DordieWatch.App.Services;
-using LibVLCSharp.Shared;
 using System.Collections.ObjectModel;
 
 namespace DordieWatch.App.ViewModels;
@@ -12,7 +11,6 @@ public sealed partial class LibraryViewModel(
     ILibraryService libraryService,
     IImageCache imageCache,
     IVideoPreviewService videoPreviewService,
-    IPreviewPlayerService previewPlayer,
     INavigationService navigation,
     IAppPaths appPaths) : ViewModelBase
 {
@@ -25,7 +23,6 @@ public sealed partial class LibraryViewModel(
     public ObservableCollection<MediaCardViewModel> Items { get; } = [];
     public ObservableCollection<EpisodeCardViewModel> SelectedEpisodes { get; } = [];
     public ObservableCollection<EpisodeRangeViewModel> EpisodeRanges { get; } = [];
-    public MediaPlayer PreviewMediaPlayer => previewPlayer.MediaPlayer;
 
     [ObservableProperty]
     private bool _isBusy;
@@ -74,6 +71,16 @@ public sealed partial class LibraryViewModel(
 
     [ObservableProperty]
     private bool _hasEpisodeRanges;
+
+    [ObservableProperty]
+    private bool _isEpisodeRangeDropdownOpen;
+
+    public bool IsEpisodeRangeDropdownClosed => !IsEpisodeRangeDropdownOpen;
+
+    partial void OnIsEpisodeRangeDropdownOpenChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsEpisodeRangeDropdownClosed));
+    }
 
     partial void OnSelectedEpisodeRangeChanged(EpisodeRangeViewModel? value)
     {
@@ -158,6 +165,20 @@ public sealed partial class LibraryViewModel(
         return Task.WhenAll(Items.Take(36).Select(x => x.LoadPosterAsync(cancellationToken)));
     }
 
+    public async Task OpenDetailsForMediaAsync(MediaLibraryItem mediaItem, CancellationToken cancellationToken)
+    {
+        await LoadFromDatabaseAsync(cancellationToken);
+
+        var card = _allItems.FirstOrDefault(item => item.Id == mediaItem.Id);
+        if (card is null)
+        {
+            return;
+        }
+
+        ActiveCategory = card.Category;
+        await OpenDetailsAsync(card, cancellationToken);
+    }
+
     [RelayCommand]
     private async Task OpenDetailsAsync(MediaCardViewModel? card, CancellationToken cancellationToken)
     {
@@ -175,7 +196,7 @@ public sealed partial class LibraryViewModel(
         SelectedTitle = card.Title;
         SelectedCountText = card.CountText;
         IsSelectedSeries = card.Item.Kind == MediaKind.Series;
-        IsDetailsOpen = true;
+        IsEpisodeRangeDropdownOpen = false;
         SelectedEpisodes.Clear();
         EpisodeRanges.Clear();
         HasEpisodeRanges = false;
@@ -191,30 +212,42 @@ public sealed partial class LibraryViewModel(
         SelectedPoster = posterTask.Result;
         SelectedBackdrop = backdropTask.Result ?? posterTask.Result;
         _selectedEpisodeItems = episodesTask.Result;
-        var previewEpisode = _selectedEpisodeItems.FirstOrDefault();
-        if (previewEpisode is not null)
-        {
-            previewPlayer.PlayLoop(previewEpisode.VideoPath);
-        }
 
         BuildEpisodeRanges();
-        SelectedEpisodeRange = EpisodeRanges.FirstOrDefault();
-        if (SelectedEpisodeRange is null)
-        {
-            await RebuildSelectedEpisodePageAsync(null, token);
-        }
+        var firstRange = EpisodeRanges.FirstOrDefault();
+        SelectedEpisodeRange = firstRange;
+        await RebuildSelectedEpisodePageAsync(firstRange, token);
+        token.ThrowIfCancellationRequested();
+        IsDetailsOpen = true;
     }
 
     [RelayCommand]
     private void CloseDetails()
     {
+        IsEpisodeRangeDropdownOpen = false;
         IsDetailsOpen = false;
-        previewPlayer.Stop();
         _detailsCancellation?.Cancel();
     }
 
     [RelayCommand]
-    private async Task PlaySelectedAsync(CancellationToken cancellationToken)
+    private void ToggleEpisodeRangeDropdown()
+    {
+        IsEpisodeRangeDropdownOpen = !IsEpisodeRangeDropdownOpen;
+    }
+
+    [RelayCommand]
+    private void SelectEpisodeRange(EpisodeRangeViewModel? range)
+    {
+        if (range is not null)
+        {
+            SelectedEpisodeRange = range;
+        }
+
+        IsEpisodeRangeDropdownOpen = false;
+    }
+
+    [RelayCommand]
+    public async Task PlaySelectedAsync(CancellationToken cancellationToken)
     {
         if (_selectedCard is null)
         {
@@ -241,19 +274,30 @@ public sealed partial class LibraryViewModel(
         HasEpisodeRanges = EpisodeRanges.Count > 0;
     }
 
-    private async Task RebuildSelectedEpisodePageAsync(EpisodeRangeViewModel? range, CancellationToken cancellationToken)
+    private Task RebuildSelectedEpisodePageAsync(EpisodeRangeViewModel? range, CancellationToken cancellationToken)
     {
         SelectedEpisodes.Clear();
         if (!IsSelectedSeries || _selectedEpisodeItems.Count == 0)
         {
-            return;
+            return Task.CompletedTask;
         }
 
         var start = range?.StartIndex ?? 0;
         var end = range?.EndIndex ?? Math.Min(12, _selectedEpisodeItems.Count);
         var imagePath = _selectedCard?.Item.BackdropPath ?? _selectedCard?.Item.PosterPath;
+        var latestWatchedEpisodeId = _selectedEpisodeItems
+            .Where(episode => episode.LastWatchedAt is not null)
+            .OrderByDescending(episode => episode.LastWatchedAt)
+            .Select(episode => episode.Id)
+            .FirstOrDefault();
         var page = _selectedEpisodeItems.Skip(start).Take(end - start)
-            .Select(episode => new EpisodeCardViewModel(episode, imagePath, imageCache, videoPreviewService, navigation))
+            .Select(episode => new EpisodeCardViewModel(
+                episode,
+                imagePath,
+                latestWatchedEpisodeId != 0 && episode.Id == latestWatchedEpisodeId,
+                imageCache,
+                videoPreviewService,
+                navigation))
             .ToArray();
 
         foreach (var episode in page)
@@ -261,6 +305,25 @@ public sealed partial class LibraryViewModel(
             SelectedEpisodes.Add(episode);
         }
 
-        await Task.WhenAll(page.Select(x => x.LoadThumbnailAsync(cancellationToken)));
+        _ = LoadEpisodeThumbnailsSequentiallyAsync(page, cancellationToken);
+        return Task.CompletedTask;
     }
+
+    private static async Task LoadEpisodeThumbnailsSequentiallyAsync(
+        IReadOnlyList<EpisodeCardViewModel> page,
+        CancellationToken cancellationToken)
+    {
+        foreach (var episode in page)
+        {
+            try
+            {
+                await episode.LoadThumbnailAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
 }

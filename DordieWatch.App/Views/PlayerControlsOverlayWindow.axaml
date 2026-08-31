@@ -1,0 +1,1065 @@
+<Window
+    x:Class="DordieWatch.App.Views.PlayerControlsOverlayWindow"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:DordieWatch.App.ViewModels"
+    x:DataType="vm:PlayerViewModel"
+    WindowDecorations="None"
+    CanResize="False"
+    ShowInTaskbar="False"
+    Background="Transparent"
+    TransparencyLevelHint="Transparent">
+
+  <Window.Resources>
+    <ControlTheme x:Key="EpisodeMenuScrollPageButton" TargetType="RepeatButton">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Background="{TemplateBinding Background}" />
+        </ControlTemplate>
+      </Setter>
+
+      <Style Selector="^:pointerover">
+        <Setter Property="Background" Value="Transparent" />
+      </Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="EpisodeMenuScrollThumb" TargetType="Thumb">
+      <Setter Property="Background" Value="#686868" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border
+              Width="7"
+              MinHeight="42"
+              HorizontalAlignment="Center"
+              Background="{TemplateBinding Background}"
+              CornerRadius="3" />
+        </ControlTemplate>
+      </Setter>
+
+      <Style Selector="^:pointerover">
+        <Setter Property="Background" Value="#8A8A8A" />
+      </Style>
+
+      <Style Selector="^:pressed">
+        <Setter Property="Background" Value="#A0A0A0" />
+      </Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="EpisodeMenuArrowScrollBar" TargetType="ScrollBar">
+      <Setter Property="Width" Value="11" />
+      <Setter Property="MinWidth" Value="11" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="AllowAutoHide" Value="False" />
+
+      <Style Selector="^:vertical">
+        <Setter Property="Template">
+          <ControlTemplate>
+            <Grid
+                Width="11"
+                Background="{TemplateBinding Background}">
+              <Track
+                  Name="PART_Track"
+                  Margin="0,5"
+                  Orientation="{TemplateBinding Orientation}"
+                  Minimum="{TemplateBinding Minimum}"
+                  Maximum="{TemplateBinding Maximum}"
+                  Value="{TemplateBinding Value}"
+                  ViewportSize="{TemplateBinding ViewportSize}"
+                  DeferThumbDrag="{TemplateBinding ScrollViewer.IsDeferredScrollingEnabled}"
+                  IsDirectionReversed="True">
+                <Track.DecreaseButton>
+                  <RepeatButton
+                      Name="PART_PageUpButton"
+                      Theme="{StaticResource EpisodeMenuScrollPageButton}"
+                      Focusable="False" />
+                </Track.DecreaseButton>
+                <Track.Thumb>
+                  <Thumb Theme="{StaticResource EpisodeMenuScrollThumb}" />
+                </Track.Thumb>
+                <Track.IncreaseButton>
+                  <RepeatButton
+                      Name="PART_PageDownButton"
+                      Theme="{StaticResource EpisodeMenuScrollPageButton}"
+                      Focusable="False" />
+                </Track.IncreaseButton>
+              </Track>
+            </Grid>
+          </ControlTemplate>
+        </Setter>
+      </Style>
+    </ControlTheme>
+  </Window.Resources>
+
+  <Window.Styles>
+    <Style Selector="Button.playerIcon">
+      <Setter Property="Background" Value="#01000000" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Width" Value="66" />
+      <Setter Property="Height" Value="66" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+
+    <Style Selector="Button.playerIcon:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#01000000" />
+    </Style>
+
+    <Style Selector="Button.playerIcon:pressed /template/ ContentPresenter">
+      <Setter Property="Background" Value="#01000000" />
+    </Style>
+
+    <Style Selector="Button.playPauseIcon">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition
+              Property="RenderTransform"
+              Duration="0:0:0.16" />
+        </Transitions>
+      </Setter>
+    </Style>
+
+    <Style Selector="Button.playPauseIcon:pointerover">
+      <Setter Property="RenderTransform" Value="scale(1.13)" />
+    </Style>
+
+    <Style Selector="Border.episodeMenuHeader">
+      <Setter Property="Background" Value="#181818" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+
+    <Style Selector="Border.episodeMenuHeader:pointerover">
+      <Setter Property="Background" Value="#2A2A2A" />
+    </Style>
+
+    <Style Selector="Border.trackMenuOption">
+      <Setter Property="Background" Value="#282828" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+
+    <Style Selector="Border.trackMenuOption:pointerover">
+      <Setter Property="Background" Value="#353535" />
+    </Style>
+
+    <Style Selector="ScrollViewer.episodeMenuList /template/ ScrollBar#PART_VerticalScrollBar">
+      <Setter Property="Theme" Value="{StaticResource EpisodeMenuArrowScrollBar}" />
+      <Setter Property="Width" Value="11" />
+      <Setter Property="MinWidth" Value="11" />
+      <Setter Property="AllowAutoHide" Value="False" />
+    </Style>
+
+    <Style Selector="Button.iconPop">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition
+              Property="RenderTransform"
+              Duration="0:0:0.16" />
+        </Transitions>
+      </Setter>
+    </Style>
+
+    <Style Selector="Button.iconPop:pointerover">
+      <Setter Property="RenderTransform" Value="scale(1.13)" />
+    </Style>
+  </Window.Styles>
+
+  <Grid x:Name="RootLayer" Background="Transparent">
+    <Button
+        x:Name="BackButton"
+        Classes="playerIcon"
+        Command="{Binding BackCommand}"
+        HorizontalAlignment="Left"
+        VerticalAlignment="Top"
+        Margin="18,26,0,0"
+        Width="62"
+        Height="54">
+      <Button.RenderTransform>
+        <TranslateTransform>
+          <TranslateTransform.Transitions>
+            <Transitions>
+              <DoubleTransition Property="Y" Duration="0:0:0.30">
+                <DoubleTransition.Easing>
+                  <CubicEaseInOut />
+                </DoubleTransition.Easing>
+              </DoubleTransition>
+            </Transitions>
+          </TranslateTransform.Transitions>
+        </TranslateTransform>
+      </Button.RenderTransform>
+      <Viewbox Width="42" Height="42">
+        <Path
+            Stroke="#FFFFFF"
+            StrokeThickness="1.7"
+            StrokeLineCap="Round"
+            StrokeJoin="Round"
+            Fill="Transparent"
+            Data="M 22 12 L 5 12 M 12 5 L 5 12 L 12 19" />
+      </Viewbox>
+    </Button>
+
+    <Border
+        x:Name="PlayerControlsPanel"
+        VerticalAlignment="Bottom"
+        Height="240"
+        Padding="14,0,0,14">
+      <Border.RenderTransform>
+        <TranslateTransform>
+          <TranslateTransform.Transitions>
+            <Transitions>
+              <DoubleTransition Property="Y" Duration="0:0:0.34">
+                <DoubleTransition.Easing>
+                  <CubicEaseInOut />
+                </DoubleTransition.Easing>
+              </DoubleTransition>
+            </Transitions>
+          </TranslateTransform.Transitions>
+        </TranslateTransform>
+      </Border.RenderTransform>
+      <StackPanel VerticalAlignment="Bottom" Spacing="2">
+        <Grid ColumnDefinitions="*,Auto" MinHeight="168">
+          <Canvas
+              x:Name="TimelineArea"
+              Grid.Column="0"
+              Height="168"
+              Background="Transparent"
+              SizeChanged="OnTimelineSizeChanged">
+            <Border
+                x:Name="TimelineRail"
+                Canvas.Top="154"
+                Height="5"
+                Background="#B8B8B8"
+                CornerRadius="3" />
+            <Border
+                x:Name="TimelineProgress"
+                Canvas.Top="154"
+                Height="5"
+                Background="#E50914"
+                CornerRadius="3" />
+            <Ellipse
+                x:Name="TimelineThumb"
+                Canvas.Top="150.5"
+                Width="12"
+                Height="12"
+                Fill="#E50914" />
+            <Canvas
+                IsHitTestVisible="False"
+                IsVisible="{Binding IsTimelinePreviewVisible}">
+              <Border
+                  Canvas.Left="{Binding TimelinePreviewLeft}"
+                  Canvas.Top="24"
+                  Width="150"
+                  Height="80"
+                  Background="#202020"
+                  CornerRadius="0"
+                  ClipToBounds="True">
+                <Image
+                    Source="{Binding TimelinePreviewImage}"
+                    Stretch="UniformToFill"
+                    IsVisible="{Binding HasTimelinePreviewImage}" />
+              </Border>
+              <Border
+                  Canvas.Left="{Binding TimelinePreviewBubbleLeft}"
+                  Canvas.Top="110"
+                  Width="68"
+                  Height="26"
+                  Background="#DD242424"
+                  CornerRadius="13">
+                <TextBlock
+                    Text="{Binding TimelinePreviewText}"
+                    Foreground="#FFFFFF"
+                    FontSize="12"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center" />
+              </Border>
+            </Canvas>
+          </Canvas>
+
+          <TextBlock
+              Grid.Column="1"
+              Text="{Binding TimeText}"
+              FontSize="14"
+              Foreground="#FFFFFF"
+              Margin="14,148,12,0"
+              VerticalAlignment="Top" />
+        </Grid>
+
+        <Grid ColumnDefinitions="*,Auto,*">
+          <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+            <Button
+                Classes="playerIcon playPauseIcon"
+                Command="{Binding TogglePauseCommand}"
+                Width="58"
+                Height="58"
+                Margin="-16,0,0,0">
+              <Grid Width="42" Height="42">
+                <Path
+                    IsVisible="{Binding !IsPlaying}"
+                    Fill="#FFFFFF"
+                    Stretch="Uniform"
+                    Width="30"
+                    Height="30"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Margin="3,0,0,0"
+                    Data="M 4 3 Q 4 1 6 2 L 33 18 Q 36 19 33 21 L 6 37 Q 4 38 4 35 Z" />
+                <Grid
+                    IsVisible="{Binding IsPlaying}"
+                    ColumnDefinitions="*,*"
+                    Width="28"
+                    Height="28"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                  <Border Grid.Column="0" Background="#FFFFFF" CornerRadius="2" Width="8" />
+                  <Border Grid.Column="1" Background="#FFFFFF" CornerRadius="2" Width="8" />
+                </Grid>
+              </Grid>
+            </Button>
+
+            <Button
+                Classes="playerIcon iconPop"
+                Command="{Binding SkipBackwardCommand}"
+                Width="44"
+                Height="66"
+                VerticalAlignment="Center"
+                Margin="-10,0,0,0">
+              <Grid Width="42" Height="42" VerticalAlignment="Center" Margin="0,-1,0,0">
+                <Canvas Width="42" Height="42">
+                  <Path
+                      Canvas.Left="1"
+                      Canvas.Top="1"
+                      Stroke="#FFFFFF"
+                      StrokeThickness="3.25"
+                      StrokeLineCap="Round"
+                      Fill="Transparent"
+                      Data="M 14 9 C 23 2 38 7 39 21 C 40 34 29 41 18 38 C 8 35 3 24 8 15" />
+                  <Path
+                      Stroke="#FFFFFF"
+                      StrokeThickness="3.25"
+                      StrokeLineCap="Round"
+                      Fill="Transparent"
+                      Data="M 14 9 L 20 7 M 14 9 L 16 3" />
+                  <Path
+                      Stroke="#FFFFFF"
+                      StrokeThickness="3.25"
+                      StrokeLineCap="Round"
+                      Fill="Transparent"
+                      Data="M 14 9 L 19 13" />
+                </Canvas>
+                <Canvas Width="42" Height="42" IsHitTestVisible="False">
+                  <TextBlock Canvas.Left="14.3" Canvas.Top="15.2" Text="10" FontSize="13.5" Foreground="#FFFFFF" />
+                </Canvas>
+              </Grid>
+            </Button>
+
+            <Button
+                Classes="playerIcon iconPop"
+                Command="{Binding SkipForwardCommand}"
+                Width="44"
+                Height="66"
+                VerticalAlignment="Center"
+                Margin="10,0,0,0">
+              <Grid Width="42" Height="42" VerticalAlignment="Center" Margin="0,-1,0,0">
+                <Canvas
+                    Width="42"
+                    Height="42"
+                    RenderTransformOrigin="50%,50%"
+                    RenderTransform="scale(-1,1)">
+                  <Path
+                      Canvas.Left="1"
+                      Canvas.Top="1"
+                      Stroke="#FFFFFF"
+                      StrokeThickness="3.25"
+                      StrokeLineCap="Round"
+                      Fill="Transparent"
+                      Data="M 14 9 C 23 2 38 7 39 21 C 40 34 29 41 18 38 C 8 35 3 24 8 15" />
+                  <Path
+                      Stroke="#FFFFFF"
+                      StrokeThickness="3.25"
+                      StrokeLineCap="Round"
+                      Fill="Transparent"
+                      Data="M 14 9 L 20 7 M 14 9 L 16 3" />
+                  <Path
+                      Stroke="#FFFFFF"
+                      StrokeThickness="3.25"
+                      StrokeLineCap="Round"
+                      Fill="Transparent"
+                      Data="M 14 9 L 19 13" />
+                </Canvas>
+                <Canvas Width="42" Height="42" IsHitTestVisible="False">
+                  <TextBlock Canvas.Left="10.1" Canvas.Top="15.2" Text="10" FontSize="13.5" Foreground="#FFFFFF" />
+                </Canvas>
+              </Grid>
+            </Button>
+
+            <Canvas Width="48" Height="66" Margin="4,0,0,0" ClipToBounds="False">
+              <Button
+                  x:Name="VolumeButton"
+                  Classes="playerIcon iconPop"
+                  Canvas.Left="0"
+                  Canvas.Top="0"
+                  Width="48"
+                  Height="66"
+                  VerticalAlignment="Center"
+                  Click="OnVolumeButtonClick">
+                <Viewbox
+                    Width="34"
+                    Height="34"
+                    VerticalAlignment="Center"
+                    Margin="0,0,0,0">
+                  <Canvas Width="42" Height="42">
+                    <Path
+                        Canvas.Left="0"
+                        Canvas.Top="0"
+                        Stroke="#FFFFFF"
+                        StrokeThickness="3.75"
+                        StrokeLineCap="Round"
+                        Fill="Transparent"
+                        Data="M 5 17 L 13 17 L 23 8 L 23 34 L 13 25 L 5 25 Z" />
+                    <Path
+                        IsVisible="{Binding HasVolume}"
+                        Canvas.Left="0"
+                        Canvas.Top="0"
+                        Stroke="#FFFFFF"
+                        StrokeThickness="3.75"
+                        StrokeLineCap="Round"
+                        Fill="Transparent"
+                        Data="M 29 16 C 32 19 32 23 29 26" />
+                    <Path
+                        IsVisible="{Binding IsVolumeLoud}"
+                        Canvas.Left="0"
+                        Canvas.Top="0"
+                        Stroke="#FFFFFF"
+                        StrokeThickness="3.75"
+                        StrokeLineCap="Round"
+                        Fill="Transparent"
+                        Data="M 34 11 C 40 17 40 25 34 31" />
+                    <Path
+                        IsVisible="{Binding IsVolumeMuted}"
+                        Canvas.Left="0"
+                        Canvas.Top="0"
+                        Stroke="#FFFFFF"
+                        StrokeThickness="3.75"
+                        StrokeLineCap="Round"
+                        Fill="Transparent"
+                        Data="M 30 15 L 38 25 M 38 15 L 30 25" />
+                  </Canvas>
+                </Viewbox>
+              </Button>
+            </Canvas>
+          </StackPanel>
+
+          <TextBlock
+              Grid.Column="1"
+              Text="{Binding Title}"
+              FontSize="18"
+              Foreground="#FFFFFF"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center"
+              Margin="18,0" />
+
+          <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10" VerticalAlignment="Center" Margin="0,0,5,0">
+            <Button
+                x:Name="NextEpisodeButton"
+                Classes="playerIcon iconPop"
+                Width="58"
+                MinWidth="0"
+                Margin="0,0,6,0"
+                IsEnabled="{Binding HasNextEpisode}"
+                Click="OnNextEpisodeButtonClick">
+              <Canvas Width="58" Height="48" RenderTransformOrigin="50%,50%" RenderTransform="scale(1.1)">
+                <Path
+                    Canvas.Left="6"
+                    Canvas.Top="3"
+                    Stroke="#FFFFFF"
+                    StrokeThickness="3.4"
+                    StrokeLineCap="Round"
+                    StrokeJoin="Round"
+                    Fill="Transparent"
+                    Data="M 9 11 L 29 24 L 9 37 Z" />
+                <Path
+                    Canvas.Left="6"
+                    Canvas.Top="3"
+                    Stroke="#FFFFFF"
+                    StrokeThickness="3.4"
+                    StrokeLineCap="Round"
+                    Fill="Transparent"
+                    Data="M 38 11 L 38 37" />
+              </Canvas>
+            </Button>
+
+            <Button
+                x:Name="EpisodesButton"
+                Classes="playerIcon iconPop"
+                Width="52"
+                Margin="0,0,6,0"
+                Click="OnEpisodesButtonClick">
+              <Canvas Width="48" Height="48" RenderTransformOrigin="50%,50%" RenderTransform="scale(1.12)">
+                <Border
+                    Canvas.Left="7"
+                    Canvas.Top="23"
+                    Width="26"
+                    Height="16"
+                    BorderBrush="#FFFFFF"
+                    BorderThickness="2.8"
+                    CornerRadius="3" />
+                <Path
+                    Stroke="#FFFFFF"
+                    StrokeThickness="2.8"
+                    StrokeLineCap="Round"
+                    StrokeJoin="Round"
+                    Fill="Transparent"
+                    Data="M 16 19 L 37 19 L 37 31" />
+                <Path
+                    Stroke="#FFFFFF"
+                    StrokeThickness="2.8"
+                    StrokeLineCap="Round"
+                    StrokeJoin="Round"
+                    Fill="Transparent"
+                    Data="M 21 13 L 42 13 L 42 25" />
+              </Canvas>
+            </Button>
+
+            <Button
+                x:Name="SubtitleButton"
+                Classes="playerIcon iconPop"
+                Width="52"
+                Click="OnSubtitleButtonClick">
+              <Canvas Width="48" Height="48" RenderTransformOrigin="50%,50%" RenderTransform="scale(1.12)">
+                <Path
+                    Canvas.Left="3"
+                    Canvas.Top="2"
+                    Stroke="#FFFFFF"
+                    StrokeThickness="2.6"
+                    StrokeLineCap="Round"
+                    StrokeJoin="Round"
+                    Fill="Transparent"
+                    Data="M 9 11 L 33 11 L 33 28 L 28 28 L 30 35 L 22 28 L 9 28 Z" />
+                <Path
+                    Canvas.Left="1.5"
+                    Canvas.Top="1.5"
+                    Stroke="#FFFFFF"
+                    StrokeThickness="2.4"
+                    StrokeLineCap="Square"
+                    Fill="Transparent"
+                    Data="M 15 18 L 22 18 M 25 18 L 30 18 M 15 23 L 22 23 M 25 23 L 30 23" />
+              </Canvas>
+            </Button>
+
+            <Button
+                x:Name="FullscreenButton"
+                Classes="playerIcon iconPop"
+                Width="52"
+                Click="OnFullscreenButtonClick">
+              <Canvas Width="48" Height="48" RenderTransformOrigin="50%,50%" RenderTransform="scale(1.12)">
+                <Path
+                    x:Name="EnterFullscreenIcon"
+                    Canvas.Left="4"
+                    Canvas.Top="4"
+                    Stroke="#FFFFFF"
+                    StrokeThickness="2.8"
+                    StrokeLineCap="Square"
+                    Fill="Transparent"
+                    Data="M 8 17 L 8 8 L 17 8 M 25 8 L 34 8 L 34 17 M 8 25 L 8 34 L 17 34 M 25 34 L 34 34 L 34 25" />
+                <Path
+                    x:Name="ExitFullscreenIcon"
+                    IsVisible="False"
+                    Canvas.Left="4"
+                    Canvas.Top="4"
+                    Stroke="#FFFFFF"
+                    StrokeThickness="2.8"
+                    StrokeLineCap="Square"
+                    Fill="Transparent"
+                    Data="M 8 17 L 17 17 L 17 8 M 25 8 L 25 17 L 34 17 M 8 25 L 17 25 L 17 34 M 25 34 L 25 25 L 34 25" />
+              </Canvas>
+            </Button>
+          </StackPanel>
+        </Grid>
+      </StackPanel>
+    </Border>
+
+    <Border
+        x:Name="EpisodesMenuPanel"
+        IsVisible="{Binding IsEpisodesMenuOpen}"
+        HorizontalAlignment="Right"
+        VerticalAlignment="Bottom"
+        Width="940"
+        Height="820"
+        Margin="0,0,0,68"
+        ZIndex="45"
+        Background="#282828"
+        ClipToBounds="True">
+      <Viewbox Stretch="Fill">
+      <Grid Width="940" Height="820">
+        <Grid IsVisible="{Binding IsEpisodeListMenuVisible}">
+          <ScrollViewer
+              Classes="episodeMenuList"
+              ClipToBounds="True"
+              AllowAutoHide="False"
+              HorizontalScrollBarVisibility="Disabled"
+              VerticalScrollBarVisibility="Visible">
+            <StackPanel>
+              <Border
+                  Classes="episodeMenuHeader"
+                  Height="70"
+                  PointerPressed="OnEpisodeMenuHeaderPointerPressed">
+                <Grid ColumnDefinitions="54,*" Margin="18,0,24,0">
+                  <Canvas Width="24" Height="24" VerticalAlignment="Center">
+                    <Path
+                        Stroke="#FFFFFF"
+                        StrokeThickness="3"
+                        StrokeLineCap="Round"
+                        StrokeJoin="Round"
+                        Fill="Transparent"
+                        Data="M 22 12 L 5 12 M 12 5 L 5 12 L 12 19" />
+                  </Canvas>
+                  <TextBlock
+                      Grid.Column="1"
+                      Text="{Binding SelectedPlayerEpisodeRangeLabel}"
+                      Foreground="#FFFFFF"
+                      FontSize="28"
+                      FontWeight="Bold"
+                      VerticalAlignment="Center"
+                      TextTrimming="CharacterEllipsis" />
+                </Grid>
+              </Border>
+              <ItemsControl ItemsSource="{Binding EpisodeMenuItems}" HorizontalAlignment="Stretch" ClipToBounds="True">
+                <ItemsControl.Styles>
+                  <Style Selector="ContentPresenter">
+                    <Setter Property="HorizontalAlignment" Value="Stretch" />
+                  </Style>
+                </ItemsControl.Styles>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate DataType="vm:PlayerEpisodeMenuItemViewModel">
+                    <Border
+                        Height="{Binding RowHeight}"
+                        HorizontalAlignment="Stretch"
+                        Background="#181818"
+                        ClipToBounds="True"
+                        Tag="{Binding}"
+                        PointerPressed="OnPlayerEpisodeMenuItemPointerPressed">
+                      <Grid>
+                        <Border
+                            IsVisible="{Binding IsCurrent}"
+                            BorderBrush="#FFFFFF"
+                            BorderThickness="4" />
+
+                      <Grid
+                          IsVisible="{Binding IsCurrent}"
+                          RowDefinitions="Auto,*"
+                          ColumnDefinitions="50,250,*"
+                          Margin="30,24,28,24">
+                        <TextBlock
+                            Text="{Binding Number}"
+                            Foreground="#FFFFFF"
+                            FontSize="22"
+                            FontWeight="Bold"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                        <TextBlock
+                            Grid.Column="1"
+                            Text="{Binding Title}"
+                            Foreground="#FFFFFF"
+                            FontSize="22"
+                            FontWeight="Bold"
+                            VerticalAlignment="Center" />
+                        <Grid Grid.Column="2" Width="132" Height="4" HorizontalAlignment="Right" VerticalAlignment="Center" ClipToBounds="True">
+                          <Border Height="2" Background="#7A7A7A" VerticalAlignment="Center" />
+                          <Border
+                              IsVisible="{Binding HasProgress}"
+                              Width="{Binding ProgressPreviewWidth}"
+                              Height="3"
+                              Background="#E50914"
+                              CornerRadius="2"
+                              HorizontalAlignment="Left"
+                              VerticalAlignment="Center" />
+                        </Grid>
+
+                        <Border
+                            Grid.Row="1"
+                            Grid.Column="1"
+                            Width="250"
+                            Height="140"
+                            Background="#101010"
+                            ClipToBounds="True"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Center">
+                          <Grid>
+                            <Image Source="{Binding Thumbnail}" Stretch="UniformToFill" />
+                            <Border Background="#66000000">
+                              <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
+                                <Canvas Width="18" Height="24">
+                                  <Rectangle Canvas.Left="0" Canvas.Top="7" Width="3" Height="10" Fill="#FFFFFF" />
+                                  <Rectangle Canvas.Left="5" Canvas.Top="3" Width="3" Height="18" Fill="#FFFFFF" />
+                                  <Rectangle Canvas.Left="10" Canvas.Top="0" Width="3" Height="24" Fill="#FFFFFF" />
+                                  <Rectangle Canvas.Left="15" Canvas.Top="5" Width="3" Height="14" Fill="#FFFFFF" />
+                                </Canvas>
+                                <TextBlock
+                                    Text="Now Playing"
+                                    Foreground="#FFFFFF"
+                                    FontSize="22"
+                                    FontWeight="Bold"
+                                    VerticalAlignment="Center" />
+                              </StackPanel>
+                            </Border>
+                          </Grid>
+                        </Border>
+
+                        <TextBlock
+                            Grid.Row="1"
+                            Grid.Column="2"
+                            Text="{Binding Description}"
+                            IsVisible="{Binding HasDescription}"
+                            Foreground="#FFFFFF"
+                            FontSize="21"
+                            FontWeight="Bold"
+                            TextWrapping="Wrap"
+                            MaxLines="4"
+                            Margin="28,0,0,0"
+                            VerticalAlignment="Center" />
+                      </Grid>
+
+                      <Grid
+                          IsVisible="{Binding IsNotCurrent}"
+                          ColumnDefinitions="50,*,150"
+                          Margin="30,0,28,0">
+                        <TextBlock
+                            Text="{Binding Number}"
+                            Foreground="#FFFFFF"
+                            FontSize="22"
+                            FontWeight="Bold"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                        <TextBlock
+                            Grid.Column="1"
+                            Text="{Binding Title}"
+                            Foreground="#FFFFFF"
+                            FontSize="22"
+                            FontWeight="Bold"
+                            VerticalAlignment="Center" />
+                        <Grid Grid.Column="2" Width="132" Height="4" HorizontalAlignment="Right" VerticalAlignment="Center" ClipToBounds="True">
+                          <Border Height="2" Background="#7A7A7A" VerticalAlignment="Center" />
+                          <Border
+                              IsVisible="{Binding HasProgress}"
+                              Width="{Binding ProgressPreviewWidth}"
+                              Height="3"
+                              Background="#E50914"
+                              CornerRadius="2"
+                              HorizontalAlignment="Left"
+                              VerticalAlignment="Center" />
+                        </Grid>
+                      </Grid>
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+
+        <Grid RowDefinitions="70,*" IsVisible="{Binding IsEpisodeRangeSelectorVisible}">
+          <Border Background="#2A2A2A">
+            <TextBlock
+                Text="{Binding SeriesTitle}"
+                Foreground="#FFFFFF"
+                FontSize="30"
+                FontWeight="Bold"
+                Margin="20,0,24,0"
+                VerticalAlignment="Center"
+                TextTrimming="CharacterEllipsis" />
+          </Border>
+
+          <ItemsControl Grid.Row="1" ItemsSource="{Binding PlayerEpisodeRanges}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="vm:PlayerEpisodeRangeViewModel">
+                <Border
+                    Height="52"
+                    Background="#282828"
+                    Tag="{Binding}"
+                    PointerPressed="OnPlayerEpisodeRangeOptionPointerPressed">
+                  <Grid>
+                    <Border
+                        IsVisible="{Binding IsSelected}"
+                        BorderBrush="#FFFFFF"
+                        BorderThickness="4" />
+                    <Grid ColumnDefinitions="52,*" Margin="0,0,24,0">
+                      <Viewbox Width="26" Height="26" HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <Path
+                            IsVisible="{Binding IsSelected}"
+                            Stroke="#FFFFFF"
+                            StrokeThickness="2.5"
+                            StrokeLineCap="Square"
+                            StrokeJoin="Round"
+                            Fill="Transparent"
+                            Data="M 7 21 L 16 30 L 34 10" />
+                      </Viewbox>
+                      <TextBlock
+                          Grid.Column="1"
+                          Text="{Binding Label}"
+                          Foreground="#FFFFFF"
+                          FontSize="22"
+                          FontWeight="Bold"
+                          VerticalAlignment="Center" />
+                    </Grid>
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </Grid>
+      </Grid>
+      </Viewbox>
+    </Border>
+
+    <Border
+        x:Name="TrackMenuPanel"
+        IsVisible="{Binding IsTrackMenuOpen}"
+        HorizontalAlignment="Right"
+        VerticalAlignment="Bottom"
+        Width="940"
+        Height="820"
+        Margin="0,0,0,68"
+        ZIndex="46"
+        Background="#282828"
+        ClipToBounds="True">
+      <Viewbox Stretch="Fill">
+        <Grid Width="940" Height="820" ColumnDefinitions="*,*">
+          <Grid Grid.Column="0" RowDefinitions="106,*">
+            <Border Height="106">
+              <TextBlock
+                  Text="Audio"
+                  Foreground="#FFFFFF"
+                  FontSize="31"
+                  FontWeight="Bold"
+                  Margin="58,0,0,0"
+                  VerticalAlignment="Center" />
+            </Border>
+
+            <ScrollViewer
+                Grid.Row="1"
+                Classes="episodeMenuList"
+                ClipToBounds="True"
+                AllowAutoHide="False"
+                HorizontalScrollBarVisibility="Disabled"
+                VerticalScrollBarVisibility="Auto">
+              <ItemsControl
+                  ItemsSource="{Binding AudioTrackOptions}"
+                  HorizontalAlignment="Stretch"
+                  Margin="38,0,18,18">
+                <ItemsControl.Styles>
+                  <Style Selector="ContentPresenter">
+                    <Setter Property="HorizontalAlignment" Value="Stretch" />
+                  </Style>
+                </ItemsControl.Styles>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate DataType="vm:PlayerTrackOptionViewModel">
+                    <Border
+                        Classes="trackMenuOption"
+                        Height="64"
+                        Margin="0,0,0,10"
+                        Tag="{Binding}"
+                        PointerPressed="OnAudioTrackOptionPointerPressed">
+                      <Grid ColumnDefinitions="42,*" Margin="2,0,16,0">
+                        <Viewbox Width="28" Height="28" HorizontalAlignment="Center" VerticalAlignment="Center">
+                          <Viewbox.RenderTransform>
+                            <TranslateTransform Y="0" />
+                          </Viewbox.RenderTransform>
+                          <Canvas Width="34" Height="34">
+                            <Path
+                                IsVisible="{Binding IsSelected}"
+                                Stroke="#FFFFFF"
+                                StrokeThickness="2.8"
+                                StrokeLineCap="Square"
+                                StrokeJoin="Round"
+                                Fill="Transparent"
+                                Data="M 5 18 L 12 25 L 28 8" />
+                          </Canvas>
+                        </Viewbox>
+                        <Grid Grid.Column="1">
+                          <TextBlock
+                              IsVisible="{Binding IsSelected}"
+                              Text="{Binding Name}"
+                              Foreground="#FFFFFF"
+                              FontSize="24"
+                              FontWeight="Bold"
+                              VerticalAlignment="Center"
+                              TextTrimming="CharacterEllipsis" />
+                          <TextBlock
+                              IsVisible="{Binding IsNotSelected}"
+                              Text="{Binding Name}"
+                              Foreground="#B6B6B6"
+                              FontSize="24"
+                              VerticalAlignment="Center"
+                              TextTrimming="CharacterEllipsis" />
+                        </Grid>
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </Grid>
+
+          <Grid Grid.Column="1" RowDefinitions="106,*">
+            <Border Height="106">
+              <TextBlock
+                  Text="Subtitles"
+                  Foreground="#FFFFFF"
+                  FontSize="31"
+                  FontWeight="Bold"
+                  Margin="38,0,0,0"
+                  VerticalAlignment="Center" />
+            </Border>
+
+            <ScrollViewer
+                Grid.Row="1"
+                Classes="episodeMenuList"
+                ClipToBounds="True"
+                AllowAutoHide="False"
+                HorizontalScrollBarVisibility="Disabled"
+                VerticalScrollBarVisibility="Auto">
+              <ItemsControl
+                  ItemsSource="{Binding SubtitleTrackOptions}"
+                  HorizontalAlignment="Stretch"
+                  Margin="18,0,18,18">
+                <ItemsControl.Styles>
+                  <Style Selector="ContentPresenter">
+                    <Setter Property="HorizontalAlignment" Value="Stretch" />
+                  </Style>
+                </ItemsControl.Styles>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate DataType="vm:PlayerTrackOptionViewModel">
+                    <Border
+                        Classes="trackMenuOption"
+                        Height="64"
+                        Margin="0,0,0,10"
+                        Tag="{Binding}"
+                        PointerPressed="OnSubtitleTrackOptionPointerPressed">
+                      <Grid ColumnDefinitions="42,*" Margin="2,0,16,0">
+                        <Viewbox
+                            Width="28"
+                            Height="28"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center">
+                          <Viewbox.RenderTransform>
+                            <TranslateTransform Y="0" />
+                          </Viewbox.RenderTransform>
+                          <Canvas Width="34" Height="34">
+                            <Path
+                                IsVisible="{Binding IsSelected}"
+                                Stroke="#FFFFFF"
+                                StrokeThickness="2.8"
+                                StrokeLineCap="Square"
+                                StrokeJoin="Round"
+                                Fill="Transparent"
+                                Data="M 5 18 L 12 25 L 28 8" />
+                          </Canvas>
+                        </Viewbox>
+                        <Grid Grid.Column="1">
+                          <TextBlock
+                              IsVisible="{Binding IsSelected}"
+                              Text="{Binding Name}"
+                              Foreground="#FFFFFF"
+                              FontSize="24"
+                              FontWeight="Bold"
+                              VerticalAlignment="Center"
+                              TextTrimming="CharacterEllipsis" />
+                          <TextBlock
+                              IsVisible="{Binding IsNotSelected}"
+                              Text="{Binding Name}"
+                              Foreground="#B6B6B6"
+                              FontSize="24"
+                              VerticalAlignment="Center"
+                              TextTrimming="CharacterEllipsis" />
+                        </Grid>
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </Grid>
+        </Grid>
+      </Viewbox>
+    </Border>
+
+    <Border
+        x:Name="VolumePopupPanel"
+        IsVisible="{Binding IsVolumePopupVisible}"
+        HorizontalAlignment="Left"
+        VerticalAlignment="Bottom"
+        Width="34"
+        Height="168"
+        Margin="204,0,0,58"
+        ZIndex="50"
+        Background="#2A2A2A"
+        CornerRadius="4"
+        ClipToBounds="True">
+      <Canvas
+          x:Name="VolumeSliderArea"
+          Width="34"
+          Height="168"
+          Background="Transparent"
+          PointerPressed="OnVolumeSliderPointerPressed"
+          PointerMoved="OnVolumeSliderPointerMoved"
+          PointerReleased="OnVolumeSliderPointerReleased">
+        <Border
+            x:Name="VolumeTrack"
+            Canvas.Left="13"
+            Canvas.Top="22"
+            Width="8"
+            Height="124"
+            Background="#8D8D8D" />
+        <Border
+            x:Name="VolumeFill"
+            Canvas.Left="13"
+            Width="8"
+            Background="#E50914" />
+        <Ellipse
+            x:Name="VolumeThumb"
+            Canvas.Left="7"
+            Width="20"
+            Height="20"
+            Fill="#E50914" />
+      </Canvas>
+    </Border>
+
+    <Grid
+        x:Name="PlaybackLoadingLayer"
+        IsVisible="False"
+        IsHitTestVisible="True"
+        Background="#000000"
+        Opacity="0"
+        ZIndex="90">
+      <Grid.Transitions>
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.22" />
+        </Transitions>
+      </Grid.Transitions>
+
+      <Canvas
+          x:Name="LoadingSpinner"
+          IsVisible="False"
+          Width="56"
+          Height="56"
+          HorizontalAlignment="Center"
+          VerticalAlignment="Center"
+          RenderTransformOrigin="50%,50%">
+        <Canvas.RenderTransform>
+          <RotateTransform />
+        </Canvas.RenderTransform>
+        <Path
+            Stroke="#E50914"
+            StrokeThickness="3"
+            StrokeLineCap="Round"
+            Fill="Transparent"
+            Data="M 28 4 A 24 24 0 1 1 4 28" />
+      </Canvas>
+    </Grid>
+
+  </Grid>
+</Window>

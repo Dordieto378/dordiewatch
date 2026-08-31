@@ -19,13 +19,23 @@
     <FluentTheme />
     <Style Selector="Window">
       <Setter Property="Background" Value="#050505" />
+      <Setter Property="FontFamily" Value="avares://DordieWatch.App/Assets/Fonts/NetflixSans-Bold.otf#Netflix Sans" />
+      <Setter Property="FontWeight" Value="Normal" />
     </Style>
     <Style Selector="TextBlock">
       <Setter Property="Foreground" Value="#F5F5F5" />
+      <Setter Property="FontFamily" Value="avares://DordieWatch.App/Assets/Fonts/NetflixSans-Bold.otf#Netflix Sans" />
+      <Setter Property="FontWeight" Value="Normal" />
+    </Style>
+    <Style Selector="ContentControl">
+      <Setter Property="FontFamily" Value="avares://DordieWatch.App/Assets/Fonts/NetflixSans-Bold.otf#Netflix Sans" />
+      <Setter Property="FontWeight" Value="Normal" />
     </Style>
     <Style Selector="Button">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="Foreground" Value="#FFFFFF" />
+      <Setter Property="FontFamily" Value="avares://DordieWatch.App/Assets/Fonts/NetflixSans-Bold.otf#Netflix Sans" />
+      <Setter Property="FontWeight" Value="Normal" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="12,8" />
       <Setter Property="CornerRadius" Value="8" />

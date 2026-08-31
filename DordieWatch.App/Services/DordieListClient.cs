@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -22,42 +23,60 @@ public sealed class DordieListClient(IAppPaths paths) : IDordieListClient, IDisp
             return new Dictionary<int, DordieListMediaMetadata>();
         }
 
+        var result = await TryGetLibraryAsync(ids, paths.DordieListLibraryUrl, cancellationToken);
+        if (result is not null)
+        {
+            return result;
+        }
+
+        if (await TryRefreshLibraryUrlAsync(cancellationToken))
+        {
+            result = await TryGetLibraryAsync(ids, paths.DordieListLibraryUrl, cancellationToken);
+            if (result is not null)
+            {
+                return result;
+            }
+        }
+
+        return new Dictionary<int, DordieListMediaMetadata>();
+    }
+
+    public async Task<DordieListMediaManifest?> GetMediaManifestAsync(
+        string manifestUrl,
+        CancellationToken cancellationToken)
+    {
+        if (!paths.IsAllowedDordieListMediaUrl(manifestUrl))
+        {
+            await LogAsync($"manifest rejected url={manifestUrl}", cancellationToken);
+            return null;
+        }
+
         try
         {
-            using var response = await _http.PostAsJsonAsync(
-                paths.DordieListLibraryUrl,
-                new DordieListLibraryRequest(ids),
-                cancellationToken);
-
+            using var response = await _http.GetAsync(manifestUrl, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                await LogAsync($"sync failed status={(int)response.StatusCode} url={paths.DordieListLibraryUrl}", cancellationToken);
-                return new Dictionary<int, DordieListMediaMetadata>();
+                await LogAsync($"manifest failed status={(int)response.StatusCode} url={manifestUrl}", cancellationToken);
+                return null;
             }
 
-            var payload = await response.Content.ReadFromJsonAsync<DordieListLibraryResponse>(cancellationToken);
-            if (payload?.Media is null)
+            var payload = await response.Content.ReadFromJsonAsync<DordieListMediaItem>(cancellationToken);
+            if (payload is null || payload.Id <= 0 || !IsSupportedType(payload.Type))
             {
-                return new Dictionary<int, DordieListMediaMetadata>();
+                return null;
             }
 
-            var result = new Dictionary<int, DordieListMediaMetadata>();
-            foreach (var item in payload.Media.Where(x => x.Id > 0 && IsSupportedType(x.Type)).GroupBy(x => x.Id).Select(x => x.First()))
+            if (!string.IsNullOrWhiteSpace(payload.LibraryUrl))
             {
-                var localCover = await DownloadImageAsync(item.Id, item.CoverUrl, "cover", cancellationToken);
-                var localBanner = await DownloadImageAsync(item.Id, item.BannerUrl, "banner", cancellationToken);
-                result[item.Id] = new DordieListMediaMetadata(
-                    item.Id,
-                    NormalizeType(item.Type),
-                    item.DisplayTitle?.Trim() ?? "",
-                    item.CoverUrl,
-                    item.BannerUrl,
-                    localCover,
-                    localBanner,
-                    item.WebsiteUrl);
+                if (!paths.TrySetDordieListLibraryUrl(payload.LibraryUrl))
+                {
+                    await LogAsync($"manifest library url rejected url={payload.LibraryUrl}", cancellationToken);
+                }
             }
 
-            return result;
+            return new DordieListMediaManifest(
+                await ToMetadataAsync(payload, cancellationToken),
+                payload.LibraryUrl);
         }
         catch (OperationCanceledException)
         {
@@ -65,8 +84,8 @@ public sealed class DordieListClient(IAppPaths paths) : IDordieListClient, IDisp
         }
         catch (Exception error) when (error is HttpRequestException or TaskCanceledException or IOException)
         {
-            await LogAsync($"sync failed error={error.GetType().Name}: {error.Message}", cancellationToken);
-            return new Dictionary<int, DordieListMediaMetadata>();
+            await LogAsync($"manifest failed error={error.GetType().Name}: {error.Message}", cancellationToken);
+            return null;
         }
     }
 
@@ -86,6 +105,101 @@ public sealed class DordieListClient(IAppPaths paths) : IDordieListClient, IDisp
         {
             // Logging must never break library loading.
         }
+    }
+
+    private async Task<IReadOnlyDictionary<int, DordieListMediaMetadata>?> TryGetLibraryAsync(
+        IReadOnlyList<int> ids,
+        string libraryUrl,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var response = await _http.PostAsJsonAsync(
+                libraryUrl,
+                new DordieListLibraryRequest(ids),
+                cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                await LogAsync($"sync failed status={(int)response.StatusCode} url={libraryUrl}", cancellationToken);
+                return response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized
+                    ? null
+                    : new Dictionary<int, DordieListMediaMetadata>();
+            }
+
+            var payload = await response.Content.ReadFromJsonAsync<DordieListLibraryResponse>(cancellationToken);
+            if (payload?.Media is null)
+            {
+                return new Dictionary<int, DordieListMediaMetadata>();
+            }
+
+            var result = new Dictionary<int, DordieListMediaMetadata>();
+            foreach (var item in payload.Media.Where(x => x.Id > 0 && IsSupportedType(x.Type)).GroupBy(x => x.Id).Select(x => x.First()))
+            {
+                result[item.Id] = await ToMetadataAsync(item, cancellationToken);
+            }
+
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or IOException)
+        {
+            await LogAsync($"sync failed error={error.GetType().Name}: {error.Message}", cancellationToken);
+            return null;
+        }
+    }
+
+    private async Task<bool> TryRefreshLibraryUrlAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var response = await _http.GetAsync(paths.DordieListConfigUrl, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                await LogAsync($"config failed status={(int)response.StatusCode} url={paths.DordieListConfigUrl}", cancellationToken);
+                return false;
+            }
+
+            var payload = await response.Content.ReadFromJsonAsync<DordieListConfigResponse>(cancellationToken);
+            if (string.IsNullOrWhiteSpace(payload?.LibraryUrl)
+                || !paths.TrySetDordieListLibraryUrl(payload.LibraryUrl))
+            {
+                await LogAsync("config failed invalid library_url", cancellationToken);
+                return false;
+            }
+
+            await LogAsync($"config updated library url={paths.DordieListLibraryUrl}", cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or IOException or UnauthorizedAccessException)
+        {
+            await LogAsync($"config failed error={error.GetType().Name}: {error.Message}", cancellationToken);
+            return false;
+        }
+    }
+
+    private async Task<DordieListMediaMetadata> ToMetadataAsync(
+        DordieListMediaItem item,
+        CancellationToken cancellationToken)
+    {
+        var localCover = await DownloadImageAsync(item.Id, item.CoverUrl, "cover", cancellationToken);
+        var localBanner = await DownloadImageAsync(item.Id, item.BannerUrl, "banner", cancellationToken);
+        return new DordieListMediaMetadata(
+            item.Id,
+            NormalizeType(item.Type),
+            item.DisplayTitle?.Trim() ?? "",
+            item.CoverUrl,
+            item.BannerUrl,
+            localCover,
+            localBanner,
+            item.WebsiteUrl);
     }
 
     private async Task<string?> DownloadImageAsync(
@@ -198,11 +312,15 @@ public sealed class DordieListClient(IAppPaths paths) : IDordieListClient, IDisp
     private sealed record DordieListLibraryResponse(
         [property: JsonPropertyName("media")] IReadOnlyList<DordieListMediaItem>? Media);
 
+    private sealed record DordieListConfigResponse(
+        [property: JsonPropertyName("library_url")] string? LibraryUrl);
+
     private sealed record DordieListMediaItem(
         [property: JsonPropertyName("id")] int Id,
         [property: JsonPropertyName("type")] string? Type,
         [property: JsonPropertyName("display_title")] string? DisplayTitle,
         [property: JsonPropertyName("cover_url")] string? CoverUrl,
         [property: JsonPropertyName("banner_url")] string? BannerUrl,
-        [property: JsonPropertyName("website_url")] string? WebsiteUrl);
+        [property: JsonPropertyName("website_url")] string? WebsiteUrl,
+        [property: JsonPropertyName("library_url")] string? LibraryUrl);
 }

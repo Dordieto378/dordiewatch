@@ -8,15 +8,9 @@ public sealed class PreviewPlayerService : IPreviewPlayerService
     private string? _currentPath;
     private bool _disposed;
 
-    public PreviewPlayerService()
+    public PreviewPlayerService(LibVLC libVlc)
     {
-        Core.Initialize();
-        _libVlc = new LibVLC(
-            "--avcodec-hw=any",
-            "--no-video-title-show",
-            "--no-osd",
-            "--no-audio",
-            "--no-spu");
+        _libVlc = libVlc;
         MediaPlayer = new MediaPlayer(_libVlc)
         {
             Mute = true,
@@ -79,6 +73,5 @@ public sealed class PreviewPlayerService : IPreviewPlayerService
         _disposed = true;
         MediaPlayer.Stop();
         MediaPlayer.Dispose();
-        _libVlc.Dispose();
     }
 }

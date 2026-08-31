@@ -19,6 +19,7 @@ public sealed partial class MediaCardViewModel(
     public string KindText => item.Kind == MediaKind.Series ? "Series" : "Movie";
     public int EpisodeCount => item.EpisodeCount;
     public double Progress => item.Progress;
+    public bool HasProgress => Progress > 0.001;
     public string CountText => item.Kind == MediaKind.Series ? $"{item.EpisodeCount} Episodes" : "";
 
     [ObservableProperty]

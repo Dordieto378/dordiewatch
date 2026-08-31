@@ -91,6 +91,17 @@ public sealed class LibraryService(
         return await GetLibraryAsync(cancellationToken);
     }
 
+    public async Task<MediaLibraryItem?> FindByWebsiteIdAsync(int websiteId, CancellationToken cancellationToken)
+    {
+        if (websiteId <= 0)
+        {
+            return null;
+        }
+
+        var items = await GetLibraryAsync(cancellationToken);
+        return items.FirstOrDefault(item => item.WebsiteIds.Contains(websiteId));
+    }
+
     public async Task<IReadOnlyList<EpisodeItem>> GetEpisodesAsync(long mediaItemId, CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -160,6 +171,7 @@ public sealed class LibraryService(
             entity.VideoPath,
             entity.ExternalSubtitlePath,
             entity.Progress?.Duration ?? entity.Duration,
-            entity.Progress?.Position ?? TimeSpan.Zero);
+            entity.Progress?.Position ?? TimeSpan.Zero,
+            entity.Progress?.LastWatchedAt);
     }
 }

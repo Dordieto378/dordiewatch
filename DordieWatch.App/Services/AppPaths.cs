@@ -14,6 +14,7 @@ public sealed class AppPaths : IAppPaths
         PreviewCacheDirectory = Path.Combine(AppDataDirectory, "previews");
         DatabasePath = Path.Combine(AppDataDirectory, "dordiewatch.db");
         VideoLibraryDirectory = ResolveVideoLibraryDirectory(root);
+        DordieListConfigUrl = "http://dordielist.test/api/dordiewatch/config";
         DordieListLibraryUrl = ResolveDordieListLibraryUrl();
 
         Directory.CreateDirectory(AppDataDirectory);
@@ -28,14 +29,37 @@ public sealed class AppPaths : IAppPaths
     public string ImageCacheDirectory { get; }
     public string WebsiteCoverDirectory { get; }
     public string PreviewCacheDirectory { get; }
-    public string DordieListLibraryUrl { get; }
+    public string DordieListLibraryUrl { get; private set; }
+    public string DordieListConfigUrl { get; }
+
+    public bool TrySetDordieListLibraryUrl(string value)
+    {
+        if (!IsAllowedDordieListLibraryUrl(value))
+        {
+            return false;
+        }
+
+        Directory.CreateDirectory(AppDataDirectory);
+        File.WriteAllText(DordieListLibraryUrlPath, value.Trim());
+        DordieListLibraryUrl = value.Trim();
+        return true;
+    }
+
+    public bool IsAllowedDordieListLibraryUrl(string value)
+    {
+        return IsAllowedDordieListUrl(value, "/api/dordiewatch/library", exactPath: true);
+    }
+
+    public bool IsAllowedDordieListMediaUrl(string value)
+    {
+        return IsAllowedDordieListUrl(value, "/api/dordiewatch/media/", exactPath: false);
+    }
 
     private string ResolveDordieListLibraryUrl()
     {
-        var configuredPath = Path.Combine(AppDataDirectory, "dordielist-library-url.txt");
-        if (File.Exists(configuredPath))
+        if (File.Exists(DordieListLibraryUrlPath))
         {
-            var configured = File.ReadAllText(configuredPath).Trim();
+            var configured = File.ReadAllText(DordieListLibraryUrlPath).Trim();
             if (IsAllowedDordieListLibraryUrl(configured))
             {
                 return configured;
@@ -45,12 +69,16 @@ public sealed class AppPaths : IAppPaths
         return "http://dordielist.test/api/dordiewatch/library";
     }
 
-    private static bool IsAllowedDordieListLibraryUrl(string value)
+    private string DordieListLibraryUrlPath => Path.Combine(AppDataDirectory, "dordielist-library-url.txt");
+
+    private static bool IsAllowedDordieListUrl(string value, string path, bool exactPath)
     {
         return Uri.TryCreate(value, UriKind.Absolute, out var uri)
-            && string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
+            && uri.Scheme is "http" or "https"
             && string.Equals(uri.Host, "dordielist.test", StringComparison.OrdinalIgnoreCase)
-            && string.Equals(uri.AbsolutePath, "/api/dordiewatch/library", StringComparison.OrdinalIgnoreCase);
+            && (exactPath
+                ? string.Equals(uri.AbsolutePath, path, StringComparison.OrdinalIgnoreCase)
+                : uri.AbsolutePath.StartsWith(path, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string ResolveVideoLibraryDirectory(string startDirectory)
