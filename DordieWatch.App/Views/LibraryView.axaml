@@ -210,6 +210,8 @@
         <Button
             Grid.Column="4"
             Classes="icon"
+            AutomationProperties.Name="Sync library"
+            ToolTip.Tip="Sync library"
             Command="{Binding RefreshCommand}"
             IsEnabled="{Binding !IsBusy}">
           <Viewbox Width="34" Height="34">

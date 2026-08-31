@@ -1,4 +1,3 @@
-using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -13,20 +12,23 @@ public sealed class DordieListClient(IAppPaths paths) : IDordieListClient, IDisp
         Timeout = TimeSpan.FromSeconds(15)
     };
 
-    public async Task<IReadOnlyDictionary<int, DordieListMediaMetadata>> GetLibraryAsync(
+    public async Task<DordieListLibrarySyncResult> GetLibraryAsync(
         IReadOnlyCollection<int> mediaIds,
         CancellationToken cancellationToken)
     {
         var ids = mediaIds.Where(id => id > 0).Distinct().Order().ToArray();
         if (ids.Length == 0)
         {
-            return new Dictionary<int, DordieListMediaMetadata>();
+            return new DordieListLibrarySyncResult(
+                new Dictionary<int, DordieListMediaMetadata>(),
+                true);
         }
 
         var result = await TryGetLibraryAsync(ids, paths.DordieListLibraryUrl, cancellationToken);
         if (result is not null)
         {
-            return result;
+            await LogAsync($"sync complete requested={ids.Length} matched={result.Count}", cancellationToken);
+            return new DordieListLibrarySyncResult(result, true);
         }
 
         if (await TryRefreshLibraryUrlAsync(cancellationToken))
@@ -34,11 +36,14 @@ public sealed class DordieListClient(IAppPaths paths) : IDordieListClient, IDisp
             result = await TryGetLibraryAsync(ids, paths.DordieListLibraryUrl, cancellationToken);
             if (result is not null)
             {
-                return result;
+                await LogAsync($"sync complete requested={ids.Length} matched={result.Count}", cancellationToken);
+                return new DordieListLibrarySyncResult(result, true);
             }
         }
 
-        return new Dictionary<int, DordieListMediaMetadata>();
+        return new DordieListLibrarySyncResult(
+            new Dictionary<int, DordieListMediaMetadata>(),
+            false);
     }
 
     public async Task<DordieListMediaManifest?> GetMediaManifestAsync(
@@ -122,15 +127,14 @@ public sealed class DordieListClient(IAppPaths paths) : IDordieListClient, IDisp
             if (!response.IsSuccessStatusCode)
             {
                 await LogAsync($"sync failed status={(int)response.StatusCode} url={libraryUrl}", cancellationToken);
-                return response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized
-                    ? null
-                    : new Dictionary<int, DordieListMediaMetadata>();
+                return null;
             }
 
             var payload = await response.Content.ReadFromJsonAsync<DordieListLibraryResponse>(cancellationToken);
             if (payload?.Media is null)
             {
-                return new Dictionary<int, DordieListMediaMetadata>();
+                await LogAsync($"sync failed invalid response url={libraryUrl}", cancellationToken);
+                return null;
             }
 
             var result = new Dictionary<int, DordieListMediaMetadata>();
