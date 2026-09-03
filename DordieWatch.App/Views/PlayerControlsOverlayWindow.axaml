@@ -96,9 +96,21 @@
       <Setter Property="Background" Value="#01000000" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="0" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
       <Setter Property="Width" Value="66" />
       <Setter Property="Height" Value="66" />
       <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Background="{TemplateBinding Background}">
+            <ContentPresenter
+                Content="{TemplateBinding Content}"
+                HorizontalContentAlignment="Center"
+                VerticalContentAlignment="Center" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
     </Style>
 
     <Style Selector="Button.playerIcon:pointerover /template/ ContentPresenter">
@@ -469,6 +481,7 @@
                 MinWidth="0"
                 Margin="0,0,6,0"
                 IsEnabled="{Binding HasNextEpisode}"
+                IsVisible="{Binding HasNextEpisode}"
                 Click="OnNextEpisodeButtonClick">
               <Canvas Width="58" Height="48" RenderTransformOrigin="50%,50%" RenderTransform="scale(1.1)">
                 <Path

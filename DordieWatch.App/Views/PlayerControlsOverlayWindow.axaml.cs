@@ -432,7 +432,7 @@ public partial class PlayerControlsOverlayWindow : Window
     {
         if (sender is Control { Tag: PlayerTrackOptionViewModel option })
         {
-            _viewModel?.SelectSubtitleTrack(option);
+            _viewModel?.SelectSubtitleOption(option);
             e.Handled = true;
         }
     }

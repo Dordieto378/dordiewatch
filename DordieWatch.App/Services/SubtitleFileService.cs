@@ -1,0 +1,596 @@
+using DordieWatch.App.Models;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace DordieWatch.App.Services;
+
+public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFileService
+{
+    private const string SubtitleRootFolderName = "subs";
+    private const string AssExtension = ".ass";
+    private const int DefaultPlayResY = 1080;
+    private const string NetflixSansBoldFontFamily = "Netflix Sans";
+    private const string NetflixSansBoldFontFileName = "NetflixSans-Bold.otf";
+
+    private static readonly HashSet<string> FontFileExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".otf", ".ttf", ".ttc", ".otc"
+    };
+
+    public IReadOnlyList<ExternalSubtitleInfo> FindForVideo(string videoPath)
+    {
+        try
+        {
+            var videoFolder = Path.GetDirectoryName(videoPath);
+            if (string.IsNullOrWhiteSpace(videoFolder) || !Directory.Exists(videoFolder))
+            {
+                return [];
+            }
+
+            var subtitlesRoot = FindSubtitlesRoot(videoFolder);
+            if (subtitlesRoot is null)
+            {
+                return [];
+            }
+
+            var videoStem = Path.GetFileNameWithoutExtension(videoPath);
+            return Directory.EnumerateDirectories(subtitlesRoot)
+                .Select(languageFolder => new ExternalSubtitleInfo(
+                    Path.GetFileName(languageFolder),
+                    FindSubtitleFile(languageFolder, videoStem) ?? ""))
+                .Where(subtitle => !string.IsNullOrWhiteSpace(subtitle.Language)
+                    && !string.IsNullOrWhiteSpace(subtitle.Path))
+                .OrderBy(subtitle => subtitle.Language, StringComparer.CurrentCultureIgnoreCase)
+                .ToArray();
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+    }
+
+    public PreparedSubtitleInfo PrepareForPlayback(string subtitlePath)
+    {
+        var originalPlaybackInfo = CreateOriginalPlaybackInfo(subtitlePath);
+        if (!File.Exists(subtitlePath)
+            || !string.Equals(Path.GetExtension(subtitlePath), AssExtension, StringComparison.OrdinalIgnoreCase))
+        {
+            return originalPlaybackInfo;
+        }
+
+        try
+        {
+            var normalizedText = NormalizeAss(subtitlePath);
+            var sourceInfo = new FileInfo(subtitlePath);
+            var hasFontFiles = HasSiblingFontFiles(sourceInfo.DirectoryName);
+            var usesNetflixSansBold = UsesNetflixSansBold(subtitlePath);
+            if (normalizedText is null && !hasFontFiles && !usesNetflixSansBold)
+            {
+                return originalPlaybackInfo;
+            }
+
+            var cacheKey = $"prepare-ass-v3|{sourceInfo.FullName}|{sourceInfo.Length}|{sourceInfo.LastWriteTimeUtc.Ticks}|{normalizedText is not null}|{usesNetflixSansBold}";
+            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cacheKey)))
+                .ToLowerInvariant()[..16];
+            var cacheDirectory = Path.Combine(paths.AppDataDirectory, "subtitle-cache", hash);
+            Directory.CreateDirectory(cacheDirectory);
+            if (hasFontFiles)
+            {
+                CopySiblingFontFiles(sourceInfo.DirectoryName, cacheDirectory);
+            }
+
+            if (usesNetflixSansBold)
+            {
+                CopyBundledNetflixSansBoldFont(cacheDirectory);
+            }
+
+            var cachePath = Path.Combine(cacheDirectory, sourceInfo.Name);
+            if (normalizedText is null)
+            {
+                if (ShouldCopyFile(subtitlePath, cachePath))
+                {
+                    File.Copy(subtitlePath, cachePath, overwrite: true);
+                }
+            }
+            else if (!File.Exists(cachePath)
+                || !string.Equals(File.ReadAllText(cachePath), normalizedText, StringComparison.Ordinal))
+            {
+                File.WriteAllText(cachePath, normalizedText, Encoding.UTF8);
+            }
+
+            return new PreparedSubtitleInfo(cachePath, cacheDirectory);
+        }
+        catch (IOException)
+        {
+            return originalPlaybackInfo;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return originalPlaybackInfo;
+        }
+    }
+
+    private string? FindSubtitlesRoot(string videoFolder)
+    {
+        var current = new DirectoryInfo(videoFolder);
+        var libraryRoot = Directory.Exists(paths.VideoLibraryDirectory)
+            ? new DirectoryInfo(paths.VideoLibraryDirectory).FullName
+            : null;
+
+        while (current is not null)
+        {
+            var subtitlesRoot = Directory.EnumerateDirectories(current.FullName)
+                .FirstOrDefault(path => string.Equals(
+                    Path.GetFileName(path),
+                    SubtitleRootFolderName,
+                    StringComparison.OrdinalIgnoreCase));
+            if (subtitlesRoot is not null)
+            {
+                return subtitlesRoot;
+            }
+
+            if (libraryRoot is not null
+                && string.Equals(current.FullName, libraryRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            current = current.Parent;
+        }
+
+        return null;
+    }
+
+    private static string? FindSubtitleFile(string languageFolder, string videoStem)
+    {
+        var exactPath = Path.Combine(languageFolder, videoStem + AssExtension);
+        if (File.Exists(exactPath))
+        {
+            return exactPath;
+        }
+
+        var languageSubtitles = Directory.EnumerateFiles(languageFolder, "*" + AssExtension, SearchOption.AllDirectories)
+            .OrderBy(path => path.Length)
+            .ThenBy(path => path, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        var caseInsensitiveMatch = languageSubtitles
+            .FirstOrDefault(path => string.Equals(
+                Path.GetFileNameWithoutExtension(path),
+                videoStem,
+                StringComparison.OrdinalIgnoreCase));
+        if (caseInsensitiveMatch is not null)
+        {
+            return caseInsensitiveMatch;
+        }
+
+        if (!int.TryParse(videoStem, NumberStyles.Integer, CultureInfo.InvariantCulture, out var videoNumber))
+        {
+            return null;
+        }
+
+        return languageSubtitles.FirstOrDefault(path =>
+            int.TryParse(Path.GetFileNameWithoutExtension(path), NumberStyles.Integer, CultureInfo.InvariantCulture, out var subtitleNumber)
+            && subtitleNumber == videoNumber);
+    }
+
+    private static void CopySiblingFontFiles(string? sourceDirectory, string cacheDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
+        {
+            return;
+        }
+
+        foreach (var fontPath in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
+            .Where(path => FontFileExtensions.Contains(Path.GetExtension(path))))
+        {
+            var targetPath = Path.Combine(cacheDirectory, Path.GetFileName(fontPath));
+            if (ShouldCopyFile(fontPath, targetPath))
+            {
+                File.Copy(fontPath, targetPath, overwrite: true);
+            }
+        }
+    }
+
+    private static bool ShouldCopyFile(string sourcePath, string targetPath)
+    {
+        if (!File.Exists(targetPath))
+        {
+            return true;
+        }
+
+        var sourceInfo = new FileInfo(sourcePath);
+        var targetInfo = new FileInfo(targetPath);
+        return sourceInfo.Length != targetInfo.Length
+            || sourceInfo.LastWriteTimeUtc != targetInfo.LastWriteTimeUtc;
+    }
+
+    private static bool HasSiblingFontFiles(string? sourceDirectory)
+    {
+        return !string.IsNullOrWhiteSpace(sourceDirectory)
+            && Directory.Exists(sourceDirectory)
+            && Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
+                .Any(path => FontFileExtensions.Contains(Path.GetExtension(path)));
+    }
+
+    private static void CopyBundledNetflixSansBoldFont(string cacheDirectory)
+    {
+        var sourcePath = Path.Combine(AppContext.BaseDirectory, "Assets", "Fonts", NetflixSansBoldFontFileName);
+        if (!File.Exists(sourcePath))
+        {
+            return;
+        }
+
+        var targetPath = Path.Combine(cacheDirectory, NetflixSansBoldFontFileName);
+        if (ShouldCopyFile(sourcePath, targetPath))
+        {
+            File.Copy(sourcePath, targetPath, overwrite: true);
+        }
+    }
+
+    private static bool UsesNetflixSansBold(string subtitlePath)
+    {
+        var text = File.ReadAllText(subtitlePath);
+        return text.Contains("NetflixSans", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Netflix Sans", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static PreparedSubtitleInfo CreateOriginalPlaybackInfo(string subtitlePath)
+    {
+        return new PreparedSubtitleInfo(
+            subtitlePath,
+            Path.GetDirectoryName(subtitlePath) ?? "");
+    }
+
+    private static string? NormalizeAss(string subtitlePath)
+    {
+        var text = File.ReadAllText(subtitlePath);
+        var newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Split('\n');
+        var changed = false;
+        var section = "";
+        var playResY = DefaultPlayResY;
+        var styleFormat = Array.Empty<string>();
+        var eventFormat = Array.Empty<string>();
+        var normalizedStyleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        for (var index = 0; index < lines.Length; index++)
+        {
+            var line = lines[index];
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("[", StringComparison.Ordinal)
+                && trimmed.EndsWith("]", StringComparison.Ordinal))
+            {
+                section = trimmed[1..^1];
+                continue;
+            }
+
+            if (string.Equals(section, "Script Info", StringComparison.OrdinalIgnoreCase))
+            {
+                playResY = TryReadPlayResY(trimmed) ?? playResY;
+                continue;
+            }
+
+            if (string.Equals(section, "V4+ Styles", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(section, "V4 Styles", StringComparison.OrdinalIgnoreCase))
+            {
+                if (trimmed.StartsWith("Format:", StringComparison.OrdinalIgnoreCase))
+                {
+                    styleFormat = ParseFormat(line, "Format:");
+                    continue;
+                }
+
+                if (trimmed.StartsWith("Style:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var normalizedLine = NormalizeStyleLine(line, styleFormat, playResY, normalizedStyleNames);
+                    if (!string.Equals(line, normalizedLine, StringComparison.Ordinal))
+                    {
+                        lines[index] = normalizedLine;
+                        changed = true;
+                    }
+                }
+
+                continue;
+            }
+
+            if (string.Equals(section, "Events", StringComparison.OrdinalIgnoreCase))
+            {
+                if (trimmed.StartsWith("Format:", StringComparison.OrdinalIgnoreCase))
+                {
+                    eventFormat = ParseFormat(line, "Format:");
+                    continue;
+                }
+
+                if (trimmed.StartsWith("Dialogue:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var normalizedLine = NormalizeDialogueLine(line, eventFormat, normalizedStyleNames);
+                    if (!string.Equals(line, normalizedLine, StringComparison.Ordinal))
+                    {
+                        lines[index] = normalizedLine;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        return changed ? string.Join(newline, lines) : null;
+    }
+
+    private static int? TryReadPlayResY(string line)
+    {
+        const string prefix = "PlayResY:";
+        if (!line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return int.TryParse(line[prefix.Length..].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            && value > 0
+            ? value
+            : null;
+    }
+
+    private static string NormalizeStyleLine(
+        string line,
+        IReadOnlyList<string> styleFormat,
+        int playResY,
+        HashSet<string> normalizedStyleNames)
+    {
+        var styleIndex = line.IndexOf("Style:", StringComparison.OrdinalIgnoreCase);
+        if (styleIndex < 0 || styleFormat.Count == 0)
+        {
+            return line;
+        }
+
+        var payloadStart = styleIndex + "Style:".Length;
+        var prefix = line[..payloadStart];
+        var fields = SplitAssFields(line[payloadStart..], styleFormat.Count);
+        var nameIndex = FindFormatIndex(styleFormat, "Name");
+        var fontNameIndex = FindFormatIndex(styleFormat, "Fontname", "FontName");
+        if (fields.Length != styleFormat.Count
+            || nameIndex < 0
+            || fontNameIndex < 0
+            || !IsNetflixSansBold(fields[fontNameIndex]))
+        {
+            return line;
+        }
+
+        normalizedStyleNames.Add(fields[nameIndex].Trim());
+        fields[fontNameIndex] = NetflixSansBoldFontFamily;
+        SetStyleField(styleFormat, fields, "Fontsize", GetDefaultFontSize(playResY));
+        SetStyleField(styleFormat, fields, "PrimaryColour", "&H00FFFFFF");
+        SetStyleField(styleFormat, fields, "SecondaryColour", "&H000000FF");
+        SetStyleField(styleFormat, fields, "OutlineColour", "&H00000000");
+        SetStyleField(styleFormat, fields, "TertiaryColour", "&H00000000");
+        SetStyleField(styleFormat, fields, "BackColour", "&H80000000");
+        SetStyleField(styleFormat, fields, "Bold", "-1");
+        SetStyleField(styleFormat, fields, "Italic", "0");
+        SetStyleField(styleFormat, fields, "Underline", "0");
+        SetStyleField(styleFormat, fields, "StrikeOut", "0");
+        SetStyleField(styleFormat, fields, "ScaleX", "100");
+        SetStyleField(styleFormat, fields, "ScaleY", "100");
+        SetStyleField(styleFormat, fields, "Spacing", "0");
+        SetStyleField(styleFormat, fields, "Angle", "0");
+        SetStyleField(styleFormat, fields, "BorderStyle", "1");
+        SetStyleField(styleFormat, fields, "Outline", "2");
+        SetStyleField(styleFormat, fields, "Shadow", "0");
+        SetStyleField(styleFormat, fields, "AlphaLevel", "0");
+
+        return prefix + string.Join(",", fields);
+    }
+
+    private static string NormalizeDialogueLine(
+        string line,
+        IReadOnlyList<string> eventFormat,
+        HashSet<string> normalizedStyleNames)
+    {
+        var dialogueIndex = line.IndexOf("Dialogue:", StringComparison.OrdinalIgnoreCase);
+        if (dialogueIndex < 0 || eventFormat.Count == 0)
+        {
+            return line;
+        }
+
+        var payloadStart = dialogueIndex + "Dialogue:".Length;
+        var fields = SplitAssFields(line[payloadStart..], eventFormat.Count);
+        var styleIndex = FindFormatIndex(eventFormat, "Style");
+        var textIndex = FindFormatIndex(eventFormat, "Text");
+        if (fields.Length != eventFormat.Count
+            || styleIndex < 0
+            || textIndex < 0
+            || !normalizedStyleNames.Contains(fields[styleIndex].Trim()))
+        {
+            return line;
+        }
+
+        fields[textIndex] = OverrideBlockRegex().Replace(fields[textIndex], match =>
+        {
+            var preservedTags = PreservePositionOverrideTags(match.Value[1..^1]);
+            return preservedTags.Length == 0 ? "" : "{" + preservedTags + "}";
+        });
+
+        return line[..payloadStart] + string.Join(",", fields);
+    }
+
+    private static string PreservePositionOverrideTags(string value)
+    {
+        var builder = new StringBuilder();
+        var index = 0;
+        while (index < value.Length)
+        {
+            if (value[index] != '\\')
+            {
+                index++;
+                continue;
+            }
+
+            var tagStart = index;
+            index++;
+            var nameStart = index;
+            if (index < value.Length && char.IsDigit(value[index]))
+            {
+                while (index < value.Length && char.IsDigit(value[index]))
+                {
+                    index++;
+                }
+
+                while (index < value.Length && char.IsLetter(value[index]))
+                {
+                    index++;
+                }
+            }
+            else
+            {
+                while (index < value.Length && char.IsLetter(value[index]))
+                {
+                    index++;
+                }
+            }
+
+            if (index == nameStart)
+            {
+                continue;
+            }
+
+            var tagName = value[nameStart..index];
+            if (index < value.Length && value[index] == '(')
+            {
+                index = ConsumeParenthesizedValue(value, index);
+            }
+            else
+            {
+                while (index < value.Length && value[index] != '\\')
+                {
+                    index++;
+                }
+            }
+
+            if (IsPositionOverrideTag(tagName))
+            {
+                builder.Append(value, tagStart, index - tagStart);
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static int ConsumeParenthesizedValue(string value, int start)
+    {
+        var depth = 0;
+        for (var index = start; index < value.Length; index++)
+        {
+            if (value[index] == '(')
+            {
+                depth++;
+            }
+            else if (value[index] == ')')
+            {
+                depth--;
+                if (depth <= 0)
+                {
+                    return index + 1;
+                }
+            }
+        }
+
+        return value.Length;
+    }
+
+    private static bool IsPositionOverrideTag(string tagName)
+    {
+        return tagName.Equals("pos", StringComparison.OrdinalIgnoreCase)
+            || tagName.Equals("move", StringComparison.OrdinalIgnoreCase)
+            || tagName.Equals("org", StringComparison.OrdinalIgnoreCase)
+            || tagName.Equals("an", StringComparison.OrdinalIgnoreCase)
+            || tagName.Equals("a", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetDefaultFontSize(int playResY)
+    {
+        var size = Math.Clamp((int)Math.Round(playResY * 0.064), 28, 82);
+        return size.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static string[] ParseFormat(string line, string prefix)
+    {
+        var prefixIndex = line.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+        return prefixIndex < 0
+            ? []
+            : line[(prefixIndex + prefix.Length)..].Split(',', StringSplitOptions.TrimEntries);
+    }
+
+    private static string[] SplitAssFields(string value, int fieldCount)
+    {
+        var fields = new string[fieldCount];
+        var start = 0;
+        for (var index = 0; index < fieldCount - 1; index++)
+        {
+            var comma = value.IndexOf(',', start);
+            if (comma < 0)
+            {
+                return [];
+            }
+
+            fields[index] = value[start..comma];
+            start = comma + 1;
+        }
+
+        fields[^1] = value[start..];
+        return fields;
+    }
+
+    private static int FindFormatIndex(IReadOnlyList<string> format, params string[] names)
+    {
+        for (var index = 0; index < format.Count; index++)
+        {
+            if (names.Any(name => string.Equals(format[index], name, StringComparison.OrdinalIgnoreCase)))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static void SetStyleField(
+        IReadOnlyList<string> styleFormat,
+        string[] fields,
+        string name,
+        string value)
+    {
+        var index = FindFormatIndex(styleFormat, name);
+        if (index >= 0 && index < fields.Length)
+        {
+            fields[index] = value;
+        }
+    }
+
+    private static bool IsNetflixSansBold(string fontName)
+    {
+        var normalized = NormalizeFontName(fontName);
+        return normalized is "NETFLIXSANSBOLD" or "NETFLIXSANS";
+    }
+
+    private static string NormalizeFontName(string value)
+    {
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                builder.Append(char.ToUpperInvariant(character));
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    [GeneratedRegex(@"\{[^{}]*\}")]
+    private static partial Regex OverrideBlockRegex();
+}

@@ -104,13 +104,34 @@ public sealed partial class MediaFileScanner : IMediaFileScanner
         var stem = Path.GetFileNameWithoutExtension(videoPath);
         foreach (var folder in subtitleFolders)
         {
-            foreach (var extension in SubtitleExtensions)
+            var directSubtitle = FindSubtitleInFolder(folder, stem);
+            if (directSubtitle is not null)
             {
-                var exact = Path.Combine(folder, stem + extension);
-                if (File.Exists(exact))
+                return directSubtitle;
+            }
+
+            foreach (var languageFolder in Directory.EnumerateDirectories(folder)
+                .OrderBy(Path.GetFileName, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var languageSubtitle = FindSubtitleInFolder(languageFolder, stem);
+                if (languageSubtitle is not null)
                 {
-                    return exact;
+                    return languageSubtitle;
                 }
+            }
+        }
+
+        return null;
+    }
+
+    private static string? FindSubtitleInFolder(string folder, string stem)
+    {
+        foreach (var extension in SubtitleExtensions)
+        {
+            var exact = Path.Combine(folder, stem + extension);
+            if (File.Exists(exact))
+            {
+                return exact;
             }
         }
 

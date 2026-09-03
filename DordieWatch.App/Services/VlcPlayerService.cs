@@ -6,12 +6,19 @@ namespace DordieWatch.App.Services;
 public sealed class VlcPlayerService : IPlayerService
 {
     private readonly LibVLC _libVlc;
+    private readonly ISubtitleFileService _subtitleFileService;
     private int _volume = 100;
     private bool _disposed;
+    private long _playbackGeneration;
+    private string? _currentVideoPath;
+    private string? _selectedExternalSubtitlePath;
+    private string? _selectedPlaybackSubtitlePath;
+    private string? _selectedSubtitleFontDirectory;
 
-    public VlcPlayerService(LibVLC libVlc)
+    public VlcPlayerService(LibVLC libVlc, ISubtitleFileService subtitleFileService)
     {
         _libVlc = libVlc;
+        _subtitleFileService = subtitleFileService;
         MediaPlayer = new MediaPlayer(_libVlc);
         ApplyVolume();
         MediaPlayer.TimeChanged += (_, _) => PositionChanged?.Invoke(this, EventArgs.Empty);
@@ -37,7 +44,6 @@ public sealed class VlcPlayerService : IPlayerService
     public TimeSpan Duration => TimeSpan.FromMilliseconds(Math.Max(0, MediaPlayer.Length));
     public bool IsPlaying => MediaPlayer.IsPlaying;
     public int SelectedAudioTrackId => MediaPlayer.AudioTrack;
-    public int SelectedSubtitleTrackId => MediaPlayer.Spu;
     public int Volume
     {
         get => _volume;
@@ -48,29 +54,28 @@ public sealed class VlcPlayerService : IPlayerService
         }
     }
 
-    public void Play(string videoPath, string? externalSubtitlePath, TimeSpan startPosition)
+    public void Play(string videoPath, TimeSpan startPosition, string? subtitlePath = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        using var media = new Media(_libVlc, new Uri(videoPath));
-        if (!string.IsNullOrWhiteSpace(externalSubtitlePath) && File.Exists(externalSubtitlePath))
+        _currentVideoPath = videoPath;
+        if (!string.IsNullOrWhiteSpace(subtitlePath) && File.Exists(subtitlePath))
         {
-            media.AddOption($":sub-file={externalSubtitlePath}");
-        }
-
-        ApplyVolume();
-        MediaPlayer.Play(media);
-        ApplyVolume();
-        _ = ReapplyVolumeAfterPlaybackStartsAsync();
-
-        if (startPosition > TimeSpan.Zero)
-        {
-            _ = Task.Run(async () =>
+            var playbackSubtitle = _subtitleFileService.PrepareForPlayback(subtitlePath);
+            if (File.Exists(playbackSubtitle.Path))
             {
-                await Task.Delay(350).ConfigureAwait(false);
-                Seek(startPosition);
-            });
+                _selectedExternalSubtitlePath = subtitlePath;
+                _selectedPlaybackSubtitlePath = playbackSubtitle.Path;
+                _selectedSubtitleFontDirectory = playbackSubtitle.FontDirectory;
+                StartMedia(videoPath, playbackSubtitle.Path, playbackSubtitle.FontDirectory, startPosition);
+                return;
+            }
         }
+
+        _selectedExternalSubtitlePath = null;
+        _selectedPlaybackSubtitlePath = null;
+        _selectedSubtitleFontDirectory = null;
+        StartMedia(videoPath, null, null, startPosition);
     }
 
     public void TogglePause()
@@ -110,28 +115,46 @@ public sealed class VlcPlayerService : IPlayerService
             .ToArray();
     }
 
-    public IReadOnlyList<PlaybackTrackInfo> GetSubtitleTracks()
-    {
-        return MediaPlayer.SpuDescription
-            .Where(track => track.Id >= 0)
-            .Select((track, index) => new PlaybackTrackInfo(
-                track.Id,
-                GetTrackName(track.Name, "Subtitle", index + 1)))
-            .GroupBy(track => track.Id)
-            .Select(group => group.First())
-            .ToArray();
-    }
-
     public bool SelectAudioTrack(int trackId)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         return MediaPlayer.SetAudioTrack(trackId);
     }
 
-    public bool SelectSubtitleTrack(int trackId)
+    public bool SelectSubtitleFile(string? subtitlePath)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return MediaPlayer.SetSpu(trackId);
+        if (string.IsNullOrWhiteSpace(subtitlePath))
+        {
+            _selectedExternalSubtitlePath = null;
+            _selectedPlaybackSubtitlePath = null;
+            _selectedSubtitleFontDirectory = null;
+            if (_currentVideoPath is null)
+            {
+                MediaPlayer.SetSpu(-1);
+                return true;
+            }
+
+            StartMedia(_currentVideoPath, null, null, Position);
+            return true;
+        }
+
+        if (!File.Exists(subtitlePath) || _currentVideoPath is null)
+        {
+            return false;
+        }
+
+        var playbackSubtitle = _subtitleFileService.PrepareForPlayback(subtitlePath);
+        if (!File.Exists(playbackSubtitle.Path))
+        {
+            return false;
+        }
+
+        _selectedExternalSubtitlePath = subtitlePath;
+        _selectedPlaybackSubtitlePath = playbackSubtitle.Path;
+        _selectedSubtitleFontDirectory = playbackSubtitle.FontDirectory;
+        StartMedia(_currentVideoPath, playbackSubtitle.Path, playbackSubtitle.FontDirectory, Position);
+        return true;
     }
 
     private static string GetTrackName(string? name, string fallbackPrefix, int number)
@@ -148,18 +171,75 @@ public sealed class VlcPlayerService : IPlayerService
         MediaPlayer.Volume = _volume;
     }
 
-    private async Task ReapplyVolumeAfterPlaybackStartsAsync()
+    private void StartMedia(string videoPath, string? subtitlePath, string? subtitleFontDirectory, TimeSpan startPosition)
+    {
+        var generation = Interlocked.Increment(ref _playbackGeneration);
+        using var media = new Media(_libVlc, new Uri(videoPath));
+        media.AddOption(":no-sub-autodetect-file");
+
+        if (!string.IsNullOrWhiteSpace(subtitlePath) && File.Exists(subtitlePath))
+        {
+            media.AddOption($":sub-file={subtitlePath}");
+            if (!string.IsNullOrWhiteSpace(subtitleFontDirectory) && Directory.Exists(subtitleFontDirectory))
+            {
+                media.AddOption($":ssa-fontsdir={subtitleFontDirectory}");
+            }
+
+            media.AddSlave(MediaSlaveType.Subtitle, 4, new Uri(subtitlePath));
+        }
+        else
+        {
+            media.AddOption(":sub-track=-1");
+        }
+
+        ApplyVolume();
+        MediaPlayer.Play(media);
+        ApplyVolume();
+        _ = ReapplyVolumeAfterPlaybackStartsAsync(generation);
+
+        if (!string.IsNullOrWhiteSpace(subtitlePath))
+        {
+            _ = SelectExternalSubtitleAfterPlaybackStartsAsync(generation);
+        }
+        else
+        {
+            _ = DisableSubtitlesAfterPlaybackStartsAsync(generation);
+        }
+
+        if (startPosition > TimeSpan.Zero)
+        {
+            _ = SeekAfterPlaybackStartsAsync(startPosition, generation);
+        }
+    }
+
+    private async Task SeekAfterPlaybackStartsAsync(TimeSpan startPosition, long generation)
+    {
+        try
+        {
+            await Task.Delay(350).ConfigureAwait(false);
+            if (!_disposed && generation == Interlocked.Read(ref _playbackGeneration))
+            {
+                Seek(startPosition);
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // Expected if the player is closed while startup seek is being applied.
+        }
+    }
+
+    private async Task ReapplyVolumeAfterPlaybackStartsAsync(long generation)
     {
         try
         {
             await Task.Delay(250).ConfigureAwait(false);
-            if (!_disposed)
+            if (!_disposed && generation == Interlocked.Read(ref _playbackGeneration))
             {
                 ApplyVolume();
             }
 
             await Task.Delay(750).ConfigureAwait(false);
-            if (!_disposed)
+            if (!_disposed && generation == Interlocked.Read(ref _playbackGeneration))
             {
                 ApplyVolume();
             }
@@ -167,6 +247,63 @@ public sealed class VlcPlayerService : IPlayerService
         catch (ObjectDisposedException)
         {
             // Expected if the player is closed while startup audio state is being applied.
+        }
+    }
+
+    private async Task DisableSubtitlesAfterPlaybackStartsAsync(long generation)
+    {
+        try
+        {
+            await Task.Delay(300).ConfigureAwait(false);
+            if (!_disposed
+                && generation == Interlocked.Read(ref _playbackGeneration)
+                && _selectedExternalSubtitlePath is null)
+            {
+                MediaPlayer.SetSpu(-1);
+            }
+
+            await Task.Delay(700).ConfigureAwait(false);
+            if (!_disposed
+                && generation == Interlocked.Read(ref _playbackGeneration)
+                && _selectedExternalSubtitlePath is null)
+            {
+                MediaPlayer.SetSpu(-1);
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // Expected if the player is closed while startup subtitle state is being applied.
+        }
+    }
+
+    private async Task SelectExternalSubtitleAfterPlaybackStartsAsync(long generation)
+    {
+        try
+        {
+            foreach (var delay in new[] { 350, 700, 1200 })
+            {
+                await Task.Delay(delay).ConfigureAwait(false);
+                if (_disposed
+                    || generation != Interlocked.Read(ref _playbackGeneration)
+                    || _selectedPlaybackSubtitlePath is null)
+                {
+                    return;
+                }
+
+                var subtitleTrackId = MediaPlayer.SpuDescription
+                    .Where(track => track.Id >= 0)
+                    .Select(track => track.Id)
+                    .LastOrDefault(-1);
+                if (subtitleTrackId >= 0)
+                {
+                    MediaPlayer.SetSpu(subtitleTrackId);
+                    TracksChanged?.Invoke(this, EventArgs.Empty);
+                }
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // Expected if the player is closed while subtitle selection is being applied.
         }
     }
 

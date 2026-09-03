@@ -10,7 +10,7 @@ public interface IPlayerService : IDisposable
     event EventHandler? PlaybackEnded;
     event EventHandler? PlaybackStarted;
     event EventHandler? TracksChanged;
-    void Play(string videoPath, string? externalSubtitlePath, TimeSpan startPosition);
+    void Play(string videoPath, TimeSpan startPosition, string? subtitlePath = null);
     void TogglePause();
     void Seek(TimeSpan position);
     void Stop();
@@ -19,9 +19,7 @@ public interface IPlayerService : IDisposable
     bool IsPlaying { get; }
     int Volume { get; set; }
     int SelectedAudioTrackId { get; }
-    int SelectedSubtitleTrackId { get; }
     IReadOnlyList<PlaybackTrackInfo> GetAudioTracks();
-    IReadOnlyList<PlaybackTrackInfo> GetSubtitleTracks();
     bool SelectAudioTrack(int trackId);
-    bool SelectSubtitleTrack(int trackId);
+    bool SelectSubtitleFile(string? subtitlePath);
 }

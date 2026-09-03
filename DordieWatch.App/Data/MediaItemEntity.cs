@@ -12,6 +12,7 @@ public sealed class MediaItemEntity
     public string FolderPath { get; set; } = "";
     public string? PosterPath { get; set; }
     public string? BackdropPath { get; set; }
+    public string? PreferredSubtitleLanguage { get; set; }
     public string WebsiteIdsJson { get; set; } = "[]";
     public DateTimeOffset UpdatedAt { get; set; }
     public List<EpisodeEntity> Episodes { get; set; } = [];

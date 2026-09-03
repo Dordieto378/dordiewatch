@@ -14,6 +14,7 @@ public sealed partial class PlayerViewModel(
     ILibraryService libraryService,
     IImageCache imageCache,
     IVideoPreviewService videoPreviewService,
+    ISubtitleFileService subtitleFileService,
     INavigationService navigation) : ViewModelBase, IDisposable
 {
     private EpisodeItem? _episode;
@@ -25,7 +26,11 @@ public sealed partial class PlayerViewModel(
     private CancellationTokenSource? _episodeMenuCancellation;
     private CancellationTokenSource? _timelinePreviewCancellation;
     private IReadOnlyList<EpisodeItem> _episodeMenuEpisodes = [];
+    private IReadOnlyList<ExternalSubtitleInfo> _externalSubtitles = [];
     private string? _episodeMenuFallbackImagePath;
+    private string? _selectedExternalSubtitlePath;
+    private long? _cachedPreferredSubtitleMediaItemId;
+    private string? _cachedPreferredSubtitleLanguage;
     private bool _isChangingEpisode;
     private bool _saveLoopStarted;
     private int _disposeState;
@@ -183,7 +188,7 @@ public sealed partial class PlayerViewModel(
     public string TimeText => FormatTime(Duration);
     public bool IsPlaying => player.IsPlaying;
 
-    public void Open(EpisodeItem episode)
+    public async Task OpenAsync(EpisodeItem episode, CancellationToken cancellationToken)
     {
         _episode = episode;
         Title = $"Episode {episode.EpisodeNumber}";
@@ -201,7 +206,14 @@ public sealed partial class PlayerViewModel(
             _eventsSubscribed = true;
         }
 
-        player.Play(episode.VideoPath, episode.ExternalSubtitlePath, episode.Position);
+        _externalSubtitles = subtitleFileService.FindForVideo(episode.VideoPath);
+        var preferredSubtitle = await FindPreferredSubtitleAsync(
+            episode.MediaItemId,
+            _externalSubtitles,
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        _selectedExternalSubtitlePath = preferredSubtitle?.Path;
+        player.Play(episode.VideoPath, episode.Position, preferredSubtitle?.Path);
         if (!_saveLoopStarted)
         {
             _saveLoopStarted = true;
@@ -372,10 +384,22 @@ public sealed partial class PlayerViewModel(
         }
     }
 
-    public void SelectSubtitleTrack(PlayerTrackOptionViewModel option)
+    public void SelectSubtitleOption(PlayerTrackOptionViewModel option)
     {
-        if (player.SelectSubtitleTrack(option.Id))
+        if (player.SelectSubtitleFile(option.SubtitlePath))
         {
+            _selectedExternalSubtitlePath = option.SubtitlePath;
+            var mediaItemId = _episode?.MediaItemId;
+            var selectedLanguage = option.SubtitlePath is null ? null : option.Name;
+            if (mediaItemId is not null)
+            {
+                _cachedPreferredSubtitleMediaItemId = mediaItemId;
+                _cachedPreferredSubtitleLanguage = selectedLanguage;
+            }
+
+            _ = SavePreferredSubtitleLanguageAsync(
+                mediaItemId,
+                selectedLanguage);
             RefreshPlaybackTracks();
             HideTrackMenu();
         }
@@ -446,7 +470,7 @@ public sealed partial class PlayerViewModel(
             player.PlaybackStarted += OnPlaybackStarted;
             try
             {
-                Open(nextEpisode);
+                await OpenAsync(nextEpisode, CancellationToken.None);
                 await playbackStarted.Task.WaitAsync(TimeSpan.FromSeconds(20));
             }
             catch (TimeoutException)
@@ -503,9 +527,19 @@ public sealed partial class PlayerViewModel(
         {
             ReplaceTrackOptions(AudioTrackOptions, player.GetAudioTracks(), player.SelectedAudioTrackId);
 
-            var subtitleTracks = new[] { new PlaybackTrackInfo(-1, "Off") }
-                .Concat(player.GetSubtitleTracks());
-            ReplaceTrackOptions(SubtitleTrackOptions, subtitleTracks, player.SelectedSubtitleTrackId);
+            var selectedSubtitleId = -1;
+            var subtitleTracks = new List<PlaybackTrackInfo> { new(-1, "Off") };
+            for (var index = 0; index < _externalSubtitles.Count; index++)
+            {
+                var subtitle = _externalSubtitles[index];
+                subtitleTracks.Add(new PlaybackTrackInfo(index, subtitle.Language, subtitle.Path));
+                if (string.Equals(subtitle.Path, _selectedExternalSubtitlePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    selectedSubtitleId = index;
+                }
+            }
+
+            ReplaceTrackOptions(SubtitleTrackOptions, subtitleTracks, selectedSubtitleId);
         }
         catch (ObjectDisposedException)
         {
@@ -529,7 +563,8 @@ public sealed partial class PlayerViewModel(
             target.Add(new PlayerTrackOptionViewModel(
                 track.Id,
                 track.Name,
-                track.Id == selectedTrackId));
+                track.Id == selectedTrackId,
+                track.SubtitlePath));
         }
     }
 
@@ -605,13 +640,70 @@ public sealed partial class PlayerViewModel(
         }
     }
 
+    private async Task<ExternalSubtitleInfo?> FindPreferredSubtitleAsync(
+        long mediaItemId,
+        IReadOnlyList<ExternalSubtitleInfo> availableSubtitles,
+        CancellationToken cancellationToken)
+    {
+        if (availableSubtitles.Count == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            var preferredLanguage = _cachedPreferredSubtitleMediaItemId == mediaItemId
+                ? _cachedPreferredSubtitleLanguage
+                : await libraryService.GetPreferredSubtitleLanguageAsync(mediaItemId, cancellationToken);
+            _cachedPreferredSubtitleMediaItemId = mediaItemId;
+            _cachedPreferredSubtitleLanguage = preferredLanguage;
+            if (string.IsNullOrWhiteSpace(preferredLanguage))
+            {
+                return null;
+            }
+
+            return availableSubtitles.FirstOrDefault(candidate =>
+                string.Equals(candidate.Language, preferredLanguage, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task SavePreferredSubtitleLanguageAsync(long? mediaItemId, string? language)
+    {
+        if (mediaItemId is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await libraryService.SavePreferredSubtitleLanguageAsync(
+                mediaItemId.Value,
+                language,
+                CancellationToken.None);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Expected if the app is closing while the preference save is in flight.
+        }
+    }
+
     private void ResetEpisodeMenu()
     {
         _episodeMenuCancellation?.Cancel();
         _episodeMenuCancellation?.Dispose();
         _episodeMenuCancellation = CancellationTokenSource.CreateLinkedTokenSource(_disposeCancellation.Token);
         _episodeMenuEpisodes = [];
+        _externalSubtitles = [];
         _episodeMenuFallbackImagePath = null;
+        _selectedExternalSubtitlePath = null;
         OnPropertyChanged(nameof(HasNextEpisode));
 
         SeriesTitle = "";

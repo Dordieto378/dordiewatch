@@ -193,6 +193,31 @@ public sealed class LibraryService(
         await db.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task<string?> GetPreferredSubtitleLanguageAsync(long mediaItemId, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        return await db.MediaItems
+            .AsNoTracking()
+            .Where(x => x.Id == mediaItemId)
+            .Select(x => x.PreferredSubtitleLanguage)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    public async Task SavePreferredSubtitleLanguageAsync(long mediaItemId, string? language, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var mediaItem = await db.MediaItems.FirstOrDefaultAsync(x => x.Id == mediaItemId, cancellationToken);
+        if (mediaItem is null)
+        {
+            return;
+        }
+
+        mediaItem.PreferredSubtitleLanguage = string.IsNullOrWhiteSpace(language)
+            ? null
+            : language.Trim();
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
     private static MediaLibraryItem ToLibraryItem(MediaItemEntity entity)
     {
         var progress = entity.Episodes

@@ -16,6 +16,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Title).HasMaxLength(512);
             entity.Property(x => x.Category).HasMaxLength(32);
             entity.Property(x => x.FolderPath).HasMaxLength(2048);
+            entity.Property(x => x.PreferredSubtitleLanguage).HasMaxLength(128);
         });
 
         modelBuilder.Entity<EpisodeEntity>(entity =>

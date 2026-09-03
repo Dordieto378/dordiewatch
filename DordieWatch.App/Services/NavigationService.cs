@@ -51,7 +51,7 @@ public sealed class NavigationService(
             DispatcherPriority.Render,
             cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        viewModel.Open(episode);
+        await viewModel.OpenAsync(episode, cancellationToken);
     }
 
     private void SetCurrent(object? viewModel)

@@ -76,6 +76,7 @@ public partial class App : Application
         services.AddSingleton<IVideoPreviewService, VideoPreviewService>();
         services.AddSingleton<IPreviewPlayerService, PreviewPlayerService>();
         services.AddSingleton<IImageCache, ImageCache>();
+        services.AddSingleton<ISubtitleFileService, SubtitleFileService>();
         services.AddSingleton<ILibraryService, LibraryService>();
         services.AddSingleton<IDordieWatchLaunchService, DordieWatchLaunchService>();
         services.AddSingleton<IPlayerService, VlcPlayerService>();
@@ -110,6 +111,15 @@ public partial class App : Application
         try
         {
             db.Database.ExecuteSqlRaw("ALTER TABLE MediaItems ADD COLUMN Category TEXT NOT NULL DEFAULT 'anime'");
+        }
+        catch
+        {
+            // Column already exists or the DB was freshly created with the current schema.
+        }
+
+        try
+        {
+            db.Database.ExecuteSqlRaw("ALTER TABLE MediaItems ADD COLUMN PreferredSubtitleLanguage TEXT NULL");
         }
         catch
         {

@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <AvaloniaResource Include="Assets\**" />
+    <None Update="Assets\Fonts\NetflixSans-Bold.otf" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

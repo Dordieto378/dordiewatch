@@ -12,6 +12,8 @@
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="0" />
       <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
     </Style>
 
     <Style Selector="Button.clean:pointerover /template/ ContentPresenter">
@@ -45,6 +47,18 @@
       <Setter Property="Width" Value="56" />
       <Setter Property="Height" Value="52" />
       <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Background="Transparent">
+            <ContentPresenter
+                Content="{TemplateBinding Content}"
+                HorizontalContentAlignment="Center"
+                VerticalContentAlignment="Center" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
     </Style>
 
     <Style Selector="Button.icon:pointerover /template/ ContentPresenter">
@@ -55,11 +69,29 @@
       <Setter Property="Background" Value="Transparent" />
     </Style>
 
+    <Style Selector="Button.iconPop">
+      <Setter Property="RenderTransformOrigin" Value="50%,50%" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition
+              Property="RenderTransform"
+              Duration="0:0:0.16" />
+        </Transitions>
+      </Setter>
+    </Style>
+
+    <Style Selector="Button.iconPop:pointerover">
+      <Setter Property="RenderTransform" Value="scale(1.13)" />
+    </Style>
+
     <Style Selector="Button.poster">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="0" />
       <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
     </Style>
 
     <Style Selector="Button.poster:pointerover /template/ ContentPresenter">
@@ -75,6 +107,8 @@
       <Setter Property="BorderThickness" Value="0" />
       <Setter Property="Padding" Value="0" />
       <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
       <Setter Property="FontSize" Value="14" />
       <Setter Property="FontWeight" Value="Normal" />
     </Style>
@@ -174,14 +208,14 @@
     <Border
         Height="68"
         VerticalAlignment="Top"
-        Background="#050505">
-      <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="28,0,28,0">
+        Background="#272727">
+      <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="38,0,28,0">
         <TextBlock
             Grid.Column="0"
-            Text="DW!"
+            Text="DORDIEWATCH!"
             Foreground="#E50914"
-            FontFamily="avares://DordieWatch.App/Assets/Fonts#Moco"
-            FontSize="38"
+            FontFamily="avares://DordieWatch.App/Assets/Fonts/Fruity Kiwi.otf#Fruity Kiwi"
+            FontSize="26"
             FontWeight="Normal"
             VerticalAlignment="Center" />
 
@@ -200,23 +234,45 @@
               CommandParameter="hentai" />
         </StackPanel>
 
-        <Button Grid.Column="3" Classes="icon" Margin="0,0,4,0">
-          <Viewbox Width="32" Height="32">
-            <Path Stroke="#FFFFFF" StrokeThickness="2.6" StrokeLineCap="Round" Fill="Transparent"
-                  Data="M 19 19 L 29 29 M 22 13 A 9 9 0 1 1 21.99 12.99" />
+        <Button
+            Grid.Column="3"
+            Classes="icon"
+            Margin="0,0,4,0"
+            AutomationProperties.Name="Search"
+            ToolTip.Tip="Search">
+          <Viewbox Width="30" Height="30">
+            <Canvas Width="32" Height="32">
+              <Ellipse
+                  Canvas.Left="6"
+                  Canvas.Top="6"
+                  Width="15"
+                  Height="15"
+                  Stroke="#FFFFFF"
+                  StrokeThickness="2.8" />
+              <Path
+                  Stroke="#FFFFFF"
+                  StrokeThickness="2.8"
+                  StrokeLineCap="Round"
+                  Fill="Transparent"
+                  Data="M 18.5 18.5 L 26 26" />
+            </Canvas>
           </Viewbox>
         </Button>
 
         <Button
             Grid.Column="4"
-            Classes="icon"
+            Classes="icon iconPop"
             AutomationProperties.Name="Sync library"
             ToolTip.Tip="Sync library"
             Command="{Binding RefreshCommand}"
             IsEnabled="{Binding !IsBusy}">
-          <Viewbox Width="34" Height="34">
-            <Path Stroke="#FFFFFF" StrokeThickness="2.35" StrokeLineCap="Round" Fill="Transparent"
-                  Data="M 25 9 A 10 10 0 1 0 27 20 M 25 9 L 25 3 M 25 9 L 31 9" />
+          <Viewbox Width="30" Height="30">
+            <Path
+                Fill="#FFFFFF"
+                Stretch="Uniform"
+                Width="24"
+                Height="24"
+                Data="M 17.65 6.35 C 16.2 4.9 14.21 4 12 4 C 7.58 4 4 7.58 4 12 C 4 16.42 7.58 20 12 20 C 15.73 20 18.84 17.45 19.73 14 L 17.65 14 C 16.83 16.33 14.61 18 12 18 C 8.69 18 6 15.31 6 12 C 6 8.69 8.69 6 12 6 C 13.66 6 15.14 6.69 16.22 7.78 L 13 11 L 20 11 L 20 4 Z" />
           </Viewbox>
         </Button>
       </Grid>
