@@ -20,12 +20,15 @@ public partial class LibraryView : UserControl
     private CancellationTokenSource? _popupAnimationCancellation;
     private RenderTargetBitmap? _detailsTransitionBitmap;
     private bool _isPlaybackTransitionRunning;
+    private bool _searchPressStartedOutside;
     private ScaleTransform DetailsScale => (ScaleTransform)DetailsTransitionVisual.RenderTransform!;
     private ScaleTransform LibraryScale => (ScaleTransform)LibrarySurface.RenderTransform!;
 
     public LibraryView()
     {
         InitializeComponent();
+        AddHandler(PointerPressedEvent, OnLibraryPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerReleasedEvent, OnLibraryPointerReleased, RoutingStrategies.Bubble, handledEventsToo: true);
     }
 
     protected override void OnDataContextChanged(EventArgs e)
@@ -40,9 +43,34 @@ public partial class LibraryView : UserControl
         {
             _viewModel.PropertyChanged += OnViewModelPropertyChanged;
             SetDetailsStateInstant(_viewModel.IsDetailsOpen);
+            UpdateHomeGridSizing();
         }
 
         base.OnDataContextChanged(e);
+    }
+
+    private void OnLibraryScrollViewerSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        UpdateHomeGridSizing();
+    }
+
+    private void UpdateHomeGridSizing()
+    {
+        if (_viewModel is null)
+        {
+            return;
+        }
+
+        var availableWidth = Math.Max(0, LibraryScrollViewer.Bounds.Width - 76);
+        _viewModel.SetHomeGridWidth(availableWidth);
+
+        var layout = LibraryItemsRepeater.Layout;
+        if (layout is not null)
+        {
+            var layoutType = layout.GetType();
+            layoutType.GetProperty("MinItemWidth")?.SetValue(layout, _viewModel.HomeGridItemWidth);
+            layoutType.GetProperty("MinItemHeight")?.SetValue(layout, _viewModel.HomeGridItemHeight);
+        }
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -51,6 +79,64 @@ public partial class LibraryView : UserControl
         {
             _ = AnimateDetailsAsync(_viewModel.IsDetailsOpen);
         }
+
+        if (e.PropertyName == nameof(LibraryViewModel.IsSearchOpen) && _viewModel?.IsSearchOpen == true)
+        {
+            Dispatcher.UIThread.Post(
+                () =>
+                {
+                    if (_viewModel?.IsSearchOpen != true)
+                    {
+                        return;
+                    }
+
+                    SearchTextBox.Focus();
+                    SearchTextBox.SelectAll();
+                },
+                DispatcherPriority.Input);
+        }
+    }
+
+    private void OnSearchTextBoxKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape || _viewModel is null)
+        {
+            return;
+        }
+
+        if (_viewModel.CloseSearchCommand.CanExecute(null))
+        {
+            _viewModel.CloseSearchCommand.Execute(null);
+            e.Handled = true;
+        }
+    }
+
+    private void OnSearchButtonClick(object? sender, RoutedEventArgs e)
+    {
+        if (_viewModel?.IsSearchOpen == true)
+        {
+            SearchTextBox.Focus();
+        }
+    }
+
+    private void OnLibraryPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        _searchPressStartedOutside = _viewModel?.IsSearchOpen == true
+            && !new Rect(SearchControl.Bounds.Size).Contains(e.GetPosition(SearchControl));
+    }
+
+    private void OnLibraryPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        var closeSearch = _searchPressStartedOutside;
+        _searchPressStartedOutside = false;
+        if (!closeSearch || _viewModel?.IsSearchOpen != true
+            || new Rect(SearchControl.Bounds.Size).Contains(e.GetPosition(SearchControl)))
+        {
+            return;
+        }
+
+        // Let the clicked control act before clearing the search rebuilds the library.
+        _viewModel.CloseSearchCommand.Execute(null);
     }
 
     private void OnDetailsLayerPointerPressed(object? sender, PointerPressedEventArgs e)

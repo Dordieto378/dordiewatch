@@ -33,10 +33,33 @@ public sealed partial class LibraryViewModel(
     [ObservableProperty]
     private string _activeCategory = "anime";
 
+    [ObservableProperty]
+    private bool _isSearchOpen;
+
+    [ObservableProperty]
+    private string _searchText = "";
+
+    [ObservableProperty]
+    private double _homeGridItemWidth = 204;
+
+    [ObservableProperty]
+    private double _homeGridItemHeight = 337;
+
+    [ObservableProperty]
+    private double _homePosterCardWidth = 190;
+
+    [ObservableProperty]
+    private double _homePosterCardHeight = 315;
+
+    [ObservableProperty]
+    private double _homePosterImageHeight = 285;
+
     public string AnimeNavForeground => ActiveCategory == "anime" ? "#FFFFFF" : "#A8A8A8";
     public string HentaiNavForeground => ActiveCategory == "hentai" ? "#FFFFFF" : "#A8A8A8";
     public bool IsAnimeActive => ActiveCategory == "anime";
     public bool IsHentaiActive => ActiveCategory == "hentai";
+    public double SearchControlWidth => IsSearchOpen ? 400 : 56;
+    public double SearchPanelOpacity => IsSearchOpen ? 1 : 0;
 
     partial void OnActiveCategoryChanged(string value)
     {
@@ -45,7 +68,53 @@ public sealed partial class LibraryViewModel(
         OnPropertyChanged(nameof(IsAnimeActive));
         OnPropertyChanged(nameof(IsHentaiActive));
         ApplyCategoryFilter();
-        _ = LoadVisiblePostersAsync(CancellationToken.None);
+        _ = LoadPostersAsync(CancellationToken.None);
+    }
+
+    partial void OnIsSearchOpenChanged(bool value)
+    {
+        OnPropertyChanged(nameof(SearchControlWidth));
+        OnPropertyChanged(nameof(SearchPanelOpacity));
+
+        if (!value && SearchText.Length > 0)
+        {
+            SearchText = "";
+        }
+    }
+
+    partial void OnSearchTextChanged(string value)
+    {
+        ApplyCategoryFilter();
+    }
+
+    public void SetHomeGridWidth(double availableWidth)
+    {
+        const int targetColumns = 6;
+        const double minimumGridItemWidth = 130;
+        const double minimumPosterWidth = 116;
+        const double horizontalPaddingPerItem = 14;
+        const double titleHeight = 30;
+        const double posterAspectRatio = 1.5;
+        const double verticalPaddingPerItem = 22;
+
+        if (!double.IsFinite(availableWidth) || availableWidth <= 0)
+        {
+            return;
+        }
+
+        var gridItemWidth = Math.Max(
+            minimumGridItemWidth,
+            Math.Floor(availableWidth / targetColumns));
+        var posterWidth = Math.Max(minimumPosterWidth, gridItemWidth - horizontalPaddingPerItem);
+        var posterImageHeight = Math.Round(posterWidth * posterAspectRatio);
+        var posterCardHeight = posterImageHeight + titleHeight;
+        var gridItemHeight = posterCardHeight + verticalPaddingPerItem;
+
+        HomeGridItemWidth = gridItemWidth;
+        HomeGridItemHeight = gridItemHeight;
+        HomePosterCardWidth = posterWidth;
+        HomePosterCardHeight = posterCardHeight;
+        HomePosterImageHeight = posterImageHeight;
     }
 
     [ObservableProperty]
@@ -140,7 +209,7 @@ public sealed partial class LibraryViewModel(
         _allItems = items.Select(item => new MediaCardViewModel(item, imageCache, navigation)).ToList();
         ApplyCategoryFilter();
 
-        await LoadVisiblePostersAsync(_loadCancellation.Token);
+        await LoadPostersAsync(_loadCancellation.Token);
     }
 
     [RelayCommand]
@@ -151,18 +220,51 @@ public sealed partial class LibraryViewModel(
             : "anime";
     }
 
+    [RelayCommand]
+    private void OpenSearch()
+    {
+        IsSearchOpen = true;
+    }
+
+    [RelayCommand]
+    private void CloseSearch()
+    {
+        IsSearchOpen = false;
+    }
+
     private void ApplyCategoryFilter()
     {
+        var query = SearchText.Trim();
+        var categoryItems = _allItems.Where(item => item.Category == ActiveCategory);
+        var filteredItems = string.IsNullOrEmpty(query)
+            ? categoryItems
+            : categoryItems.Where(item => item.Title.Contains(query, StringComparison.OrdinalIgnoreCase));
+
         Items.Clear();
-        foreach (var item in _allItems.Where(item => item.Category == ActiveCategory))
+        foreach (var item in filteredItems)
         {
             Items.Add(item);
         }
     }
 
-    private Task LoadVisiblePostersAsync(CancellationToken cancellationToken)
+    private async Task LoadPostersAsync(CancellationToken cancellationToken)
     {
-        return Task.WhenAll(Items.Take(36).Select(x => x.LoadPosterAsync(cancellationToken)));
+        var items = Items.ToArray();
+        using var gate = new SemaphoreSlim(8);
+        var tasks = items.Select(async item =>
+        {
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                await item.LoadPosterAsync(cancellationToken);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        });
+
+        await Task.WhenAll(tasks);
     }
 
     public async Task OpenDetailsForMediaAsync(MediaLibraryItem mediaItem, CancellationToken cancellationToken)

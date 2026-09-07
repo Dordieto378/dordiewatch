@@ -85,6 +85,26 @@
       <Setter Property="RenderTransform" Value="scale(1.13)" />
     </Style>
 
+    <Style Selector="TextBox.searchInput">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="#FFFFFF" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="FontFamily" Value="Segoe UI" />
+      <Setter Property="FontSize" Value="16" />
+      <Setter Property="CaretBrush" Value="#FFFFFF" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="FocusAdorner" Value="{x:Null}" />
+    </Style>
+
+    <Style Selector="TextBox.searchInput /template/ Border#PART_BorderElement, TextBox.searchInput:pointerover /template/ Border#PART_BorderElement, TextBox.searchInput:focus /template/ Border#PART_BorderElement">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+    </Style>
+
     <Style Selector="Button.poster">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
@@ -157,15 +177,19 @@
     <Grid.RenderTransform>
       <ScaleTransform ScaleX="1" ScaleY="1" />
     </Grid.RenderTransform>
-    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+    <ScrollViewer
+        x:Name="LibraryScrollViewer"
+        HorizontalScrollBarVisibility="Disabled"
+        SizeChanged="OnLibraryScrollViewerSizeChanged">
       <StackPanel Margin="38,94,38,46" Spacing="0">
         <ItemsRepeater
+            x:Name="LibraryItemsRepeater"
             ItemsSource="{Binding Items}"
-            Margin="0,0,-204,0">
+            Margin="0">
           <ItemsRepeater.Layout>
             <UniformGridLayout
-                MinItemWidth="204"
-                MinItemHeight="337"
+                MinItemWidth="{Binding HomeGridItemWidth}"
+                MinItemHeight="{Binding HomeGridItemHeight}"
                 ItemsJustification="Start"
                 ItemsStretch="None" />
           </ItemsRepeater.Layout>
@@ -175,8 +199,16 @@
                   Classes="poster"
                   Command="{Binding $parent[UserControl].DataContext.OpenDetailsCommand}"
                   CommandParameter="{Binding}">
-                <Grid Width="190" Height="315" RowDefinitions="285,30">
-                  <Border Grid.Row="0" CornerRadius="7" ClipToBounds="True" Background="#171717">
+                <Grid
+                    Width="{Binding $parent[UserControl].DataContext.HomePosterCardWidth}"
+                    Height="{Binding $parent[UserControl].DataContext.HomePosterCardHeight}"
+                    RowDefinitions="Auto,30">
+                  <Border
+                      Grid.Row="0"
+                      Height="{Binding $parent[UserControl].DataContext.HomePosterImageHeight}"
+                      CornerRadius="7"
+                      ClipToBounds="True"
+                      Background="#171717">
                     <Image Source="{Binding Poster}" Stretch="UniformToFill" />
                   </Border>
 
@@ -209,7 +241,7 @@
         Height="68"
         VerticalAlignment="Top"
         Background="#272727">
-      <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="38,0,28,0">
+      <Grid ColumnDefinitions="Auto,Auto,*,Auto" Margin="38,0,28,0">
         <TextBlock
             Grid.Column="0"
             Text="DORDIEWATCH!"
@@ -234,33 +266,86 @@
               CommandParameter="hentai" />
         </StackPanel>
 
-        <Button
-            Grid.Column="3"
-            Classes="icon"
-            Margin="0,0,4,0"
-            AutomationProperties.Name="Search"
-            ToolTip.Tip="Search">
-          <Viewbox Width="30" Height="30">
-            <Canvas Width="32" Height="32">
-              <Ellipse
-                  Canvas.Left="6"
-                  Canvas.Top="6"
-                  Width="15"
-                  Height="15"
-                  Stroke="#FFFFFF"
-                  StrokeThickness="2.8" />
-              <Path
-                  Stroke="#FFFFFF"
-                  StrokeThickness="2.8"
-                  StrokeLineCap="Round"
-                  Fill="Transparent"
-                  Data="M 18.5 18.5 L 26 26" />
-            </Canvas>
-          </Viewbox>
-        </Button>
+        <Grid
+            x:Name="SearchSlot"
+            Grid.Column="2"
+            Height="56"
+            Margin="24,0,4,0"
+            VerticalAlignment="Center">
+          <Grid
+              x:Name="SearchControl"
+              Width="{Binding SearchControlWidth}"
+              MaxWidth="{Binding #SearchSlot.Bounds.Width}"
+              Height="56"
+              HorizontalAlignment="Right"
+              ClipToBounds="True">
+            <Grid.Transitions>
+              <Transitions>
+                <DoubleTransition Property="Width" Duration="0:0:0.25">
+                  <DoubleTransition.Easing>
+                    <CubicEaseInOut />
+                  </DoubleTransition.Easing>
+                </DoubleTransition>
+              </Transitions>
+            </Grid.Transitions>
+
+            <Border
+                x:Name="SearchSurface"
+                Background="#161616"
+                CornerRadius="28"
+                Opacity="{Binding SearchPanelOpacity}"
+                IsHitTestVisible="False">
+              <Border.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="Opacity" Duration="0:0:0.12" />
+                </Transitions>
+              </Border.Transitions>
+            </Border>
+
+            <Grid ColumnDefinitions="56,*">
+              <Button
+                  x:Name="SearchButton"
+                  Classes="icon iconPop"
+                  AutomationProperties.Name="Search"
+                  ToolTip.Tip="Search"
+                  Command="{Binding OpenSearchCommand}"
+                  Click="OnSearchButtonClick"
+                  VerticalAlignment="Center">
+                <Viewbox Width="30" Height="30">
+                  <Canvas Width="24" Height="24">
+                    <Ellipse
+                        Canvas.Left="1"
+                        Canvas.Top="1"
+                        Width="18"
+                        Height="18"
+                        Stroke="#FFFFFF"
+                        StrokeThickness="2.4" />
+                    <Path
+                        Stroke="#FFFFFF"
+                        StrokeThickness="2.4"
+                        StrokeLineCap="Round"
+                        Data="M 16 16 L 22 22" />
+                  </Canvas>
+                </Viewbox>
+              </Button>
+
+              <TextBox
+                  x:Name="SearchTextBox"
+                  Grid.Column="1"
+                  Classes="searchInput"
+                  AutomationProperties.Name="Search library"
+                  Text="{Binding SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                  IsVisible="{Binding IsSearchOpen}"
+                  VerticalAlignment="Center"
+                  VerticalContentAlignment="Center"
+                  Margin="-8,0,22,0"
+                  KeyDown="OnSearchTextBoxKeyDown" />
+            </Grid>
+          </Grid>
+        </Grid>
 
         <Button
-            Grid.Column="4"
+            Grid.Column="3"
             Classes="icon iconPop"
             AutomationProperties.Name="Sync library"
             ToolTip.Tip="Sync library"

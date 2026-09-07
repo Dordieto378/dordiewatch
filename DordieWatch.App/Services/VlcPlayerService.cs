@@ -176,6 +176,9 @@ public sealed class VlcPlayerService : IPlayerService
         var generation = Interlocked.Increment(ref _playbackGeneration);
         using var media = new Media(_libVlc, new Uri(videoPath));
         media.AddOption(":no-sub-autodetect-file");
+        media.AddOption(":sub-track=-1");
+        media.AddOption(":sub-track-id=-1");
+        media.AddOption(":sub-language=none");
 
         if (!string.IsNullOrWhiteSpace(subtitlePath) && File.Exists(subtitlePath))
         {
@@ -184,14 +187,7 @@ public sealed class VlcPlayerService : IPlayerService
             {
                 media.AddOption($":ssa-fontsdir={subtitleFontDirectory}");
             }
-
-            media.AddSlave(MediaSlaveType.Subtitle, 4, new Uri(subtitlePath));
         }
-        else
-        {
-            media.AddOption(":sub-track=-1");
-        }
-
         ApplyVolume();
         MediaPlayer.Play(media);
         ApplyVolume();
@@ -280,6 +276,7 @@ public sealed class VlcPlayerService : IPlayerService
     {
         try
         {
+            var slaveAdded = false;
             foreach (var delay in new[] { 350, 700, 1200 })
             {
                 await Task.Delay(delay).ConfigureAwait(false);
@@ -290,13 +287,14 @@ public sealed class VlcPlayerService : IPlayerService
                     return;
                 }
 
-                var subtitleTrackId = MediaPlayer.SpuDescription
-                    .Where(track => track.Id >= 0)
-                    .Select(track => track.Id)
-                    .LastOrDefault(-1);
-                if (subtitleTrackId >= 0)
+                if (!slaveAdded || MediaPlayer.Spu < 0)
                 {
-                    MediaPlayer.SetSpu(subtitleTrackId);
+                    MediaPlayer.SetSpu(-1);
+                    MediaPlayer.AddSlave(
+                        MediaSlaveType.Subtitle,
+                        new Uri(_selectedPlaybackSubtitlePath).AbsoluteUri,
+                        select: true);
+                    slaveAdded = true;
                     TracksChanged?.Invoke(this, EventArgs.Empty);
                 }
             }
