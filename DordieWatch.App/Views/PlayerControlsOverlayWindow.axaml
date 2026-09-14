@@ -509,6 +509,8 @@
                 Classes="playerIcon iconPop"
                 Width="52"
                 Margin="0,0,6,0"
+                IsVisible="{Binding HasEpisodeMenu}"
+                IsEnabled="{Binding HasEpisodeMenu}"
                 Click="OnEpisodesButtonClick">
               <Canvas Width="48" Height="48" RenderTransformOrigin="50%,50%" RenderTransform="scale(1.12)">
                 <Border

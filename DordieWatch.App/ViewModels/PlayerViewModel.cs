@@ -93,8 +93,9 @@ public sealed partial class PlayerViewModel(
     public bool IsVolumeMuted => VolumePercent <= 0.5;
     public bool HasVolume => VolumePercent > 0.5;
     public bool IsVolumeLoud => VolumePercent > 50;
-    public bool IsEpisodeListMenuVisible => IsEpisodesMenuOpen && !IsEpisodeRangeSelectorOpen;
-    public bool IsEpisodeRangeSelectorVisible => IsEpisodesMenuOpen && IsEpisodeRangeSelectorOpen;
+    public bool HasEpisodeMenu => _episodeMenuEpisodes.Count > 1;
+    public bool IsEpisodeListMenuVisible => HasEpisodeMenu && IsEpisodesMenuOpen && !IsEpisodeRangeSelectorOpen;
+    public bool IsEpisodeRangeSelectorVisible => HasEpisodeMenu && IsEpisodesMenuOpen && IsEpisodeRangeSelectorOpen;
     public bool HasNextEpisode
     {
         get
@@ -129,6 +130,12 @@ public sealed partial class PlayerViewModel(
 
     partial void OnIsEpisodesMenuOpenChanged(bool value)
     {
+        if (value && !HasEpisodeMenu)
+        {
+            IsEpisodesMenuOpen = false;
+            return;
+        }
+
         if (!value)
         {
             IsEpisodeRangeSelectorOpen = false;
@@ -157,6 +164,12 @@ public sealed partial class PlayerViewModel(
 
     partial void OnIsEpisodeRangeSelectorOpenChanged(bool value)
     {
+        if (value && !HasEpisodeMenu)
+        {
+            IsEpisodeRangeSelectorOpen = false;
+            return;
+        }
+
         OnPropertyChanged(nameof(IsEpisodeListMenuVisible));
         OnPropertyChanged(nameof(IsEpisodeRangeSelectorVisible));
     }
@@ -170,6 +183,13 @@ public sealed partial class PlayerViewModel(
 
         OnPropertyChanged(nameof(SelectedPlayerEpisodeRangeLabel));
         RebuildEpisodeMenuItems();
+    }
+
+    private void NotifyEpisodeMenuAvailabilityChanged()
+    {
+        OnPropertyChanged(nameof(HasEpisodeMenu));
+        OnPropertyChanged(nameof(IsEpisodeListMenuVisible));
+        OnPropertyChanged(nameof(IsEpisodeRangeSelectorVisible));
     }
 
     public double PositionSeconds
@@ -365,6 +385,12 @@ public sealed partial class PlayerViewModel(
 
     public void ToggleEpisodesMenu()
     {
+        if (!HasEpisodeMenu)
+        {
+            IsEpisodesMenuOpen = false;
+            return;
+        }
+
         IsEpisodesMenuOpen = !IsEpisodesMenuOpen;
     }
 
@@ -415,12 +441,24 @@ public sealed partial class PlayerViewModel(
 
     public void ShowEpisodeRangeSelector()
     {
+        if (!HasEpisodeMenu)
+        {
+            IsEpisodesMenuOpen = false;
+            return;
+        }
+
         IsEpisodesMenuOpen = true;
         IsEpisodeRangeSelectorOpen = true;
     }
 
     public void SelectPlayerEpisodeRange(PlayerEpisodeRangeViewModel range)
     {
+        if (!HasEpisodeMenu)
+        {
+            IsEpisodesMenuOpen = false;
+            return;
+        }
+
         SelectedPlayerEpisodeRange = range;
         IsEpisodesMenuOpen = true;
         IsEpisodeRangeSelectorOpen = false;
@@ -786,6 +824,7 @@ public sealed partial class PlayerViewModel(
         _externalSubtitles = [];
         _episodeMenuFallbackImagePath = null;
         _selectedExternalSubtitlePath = null;
+        NotifyEpisodeMenuAvailabilityChanged();
         OnPropertyChanged(nameof(HasNextEpisode));
 
         SeriesTitle = "";
@@ -821,7 +860,13 @@ public sealed partial class PlayerViewModel(
                 Title = GetPlayerTitle(currentEpisode, episodes, mediaItem?.Title);
                 _episodeMenuEpisodes = episodes;
                 _episodeMenuFallbackImagePath = mediaItem?.BackdropPath ?? mediaItem?.PosterPath;
+                NotifyEpisodeMenuAvailabilityChanged();
                 OnPropertyChanged(nameof(HasNextEpisode));
+                if (!HasEpisodeMenu)
+                {
+                    IsEpisodesMenuOpen = false;
+                    IsEpisodeRangeSelectorOpen = false;
+                }
                 BuildPlayerEpisodeRanges(currentEpisode.Id);
             }, DispatcherPriority.Render, cancellationToken);
         }
