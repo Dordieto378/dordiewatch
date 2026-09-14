@@ -206,13 +206,16 @@ public sealed partial class PlayerViewModel(
             _eventsSubscribed = true;
         }
 
-        _externalSubtitles = subtitleFileService.FindForVideo(episode.VideoPath);
+        _externalSubtitles = WithScannedSubtitleFallback(
+            subtitleFileService.FindForVideo(episode.VideoPath),
+            episode.ExternalSubtitlePath);
         var preferredSubtitle = await FindPreferredSubtitleAsync(
             episode.MediaItemId,
             _externalSubtitles,
             cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         _selectedExternalSubtitlePath = preferredSubtitle?.Path;
+        RefreshSubtitleTrackOptions();
         player.Play(episode.VideoPath, episode.Position, preferredSubtitle?.Path);
         if (!_saveLoopStarted)
         {
@@ -523,10 +526,26 @@ public sealed partial class PlayerViewModel(
 
     private void RefreshPlaybackTracks()
     {
+        RefreshAudioTrackOptions();
+        RefreshSubtitleTrackOptions();
+    }
+
+    private void RefreshAudioTrackOptions()
+    {
         try
         {
             ReplaceTrackOptions(AudioTrackOptions, player.GetAudioTracks(), player.SelectedAudioTrackId);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Native track events can arrive while the player is closing.
+        }
+    }
 
+    private void RefreshSubtitleTrackOptions()
+    {
+        try
+        {
             var selectedSubtitleId = -1;
             var subtitleTracks = new List<PlaybackTrackInfo> { new(-1, "Off") };
             for (var index = 0; index < _externalSubtitles.Count; index++)
@@ -566,6 +585,34 @@ public sealed partial class PlayerViewModel(
                 track.Id == selectedTrackId,
                 track.SubtitlePath));
         }
+    }
+
+    private static IReadOnlyList<ExternalSubtitleInfo> WithScannedSubtitleFallback(
+        IReadOnlyList<ExternalSubtitleInfo> discoveredSubtitles,
+        string? scannedSubtitlePath)
+    {
+        if (string.IsNullOrWhiteSpace(scannedSubtitlePath)
+            || !File.Exists(scannedSubtitlePath)
+            || discoveredSubtitles.Any(subtitle =>
+                string.Equals(subtitle.Path, scannedSubtitlePath, StringComparison.OrdinalIgnoreCase)))
+        {
+            return discoveredSubtitles;
+        }
+
+        return discoveredSubtitles
+            .Append(new ExternalSubtitleInfo(
+                GetSubtitleLanguageFromPath(scannedSubtitlePath),
+                scannedSubtitlePath))
+            .OrderBy(subtitle => subtitle.Language, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+    }
+
+    private static string GetSubtitleLanguageFromPath(string subtitlePath)
+    {
+        var folderName = Path.GetFileName(Path.GetDirectoryName(subtitlePath));
+        return string.IsNullOrWhiteSpace(folderName)
+            ? "External"
+            : folderName;
     }
 
     private static string FormatTime(TimeSpan value)

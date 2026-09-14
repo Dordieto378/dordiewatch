@@ -86,16 +86,16 @@ public sealed class AppPaths : IAppPaths
         var repoRoot = FindRepositoryRoot(startDirectory);
         if (repoRoot is not null)
         {
-            var publishedVideos = Path.Combine(repoRoot.FullName, "publish", "DordieWatch", "videos");
-            if (LooksLikeVideoLibrary(publishedVideos))
-            {
-                return publishedVideos;
-            }
-
             var repoVideos = Path.Combine(repoRoot.FullName, "videos");
             if (LooksLikeVideoLibrary(repoVideos))
             {
                 return repoVideos;
+            }
+
+            var publishedVideos = Path.Combine(repoRoot.FullName, "publish", "DordieWatch", "videos");
+            if (LooksLikeVideoLibrary(publishedVideos))
+            {
+                return publishedVideos;
             }
         }
 

@@ -170,7 +170,7 @@ public sealed partial class LibraryViewModel(
         }
 
         await LoadFromDatabaseAsync(cancellationToken);
-        if (_allItems.Count == 0)
+        if (_allItems.Count == 0 || HasMissingLibraryFolders())
         {
             await RefreshAsync(cancellationToken);
         }
@@ -222,6 +222,11 @@ public sealed partial class LibraryViewModel(
         ApplyCategoryFilter();
 
         await LoadPostersAsync(_loadCancellation.Token);
+    }
+
+    private bool HasMissingLibraryFolders()
+    {
+        return _allItems.Any(item => !Directory.Exists(item.Item.FolderPath));
     }
 
     [RelayCommand]
