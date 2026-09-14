@@ -19,6 +19,7 @@ public sealed partial class LibraryViewModel(
     private MediaCardViewModel? _selectedCard;
     private IReadOnlyList<EpisodeItem> _selectedEpisodeItems = [];
     private List<MediaCardViewModel> _allItems = [];
+    private readonly Dictionary<string, double> _homeScrollOffsets = new(StringComparer.OrdinalIgnoreCase);
 
     public ObservableCollection<MediaCardViewModel> Items { get; } = [];
     public ObservableCollection<EpisodeCardViewModel> SelectedEpisodes { get; } = [];
@@ -38,6 +39,9 @@ public sealed partial class LibraryViewModel(
 
     [ObservableProperty]
     private string _searchText = "";
+
+    [ObservableProperty]
+    private double _homeScrollOffset;
 
     [ObservableProperty]
     private double _homeGridItemWidth = 204;
@@ -63,6 +67,7 @@ public sealed partial class LibraryViewModel(
 
     partial void OnActiveCategoryChanged(string value)
     {
+        HomeScrollOffset = GetHomeScrollOffset();
         OnPropertyChanged(nameof(AnimeNavForeground));
         OnPropertyChanged(nameof(HentaiNavForeground));
         OnPropertyChanged(nameof(IsAnimeActive));
@@ -159,6 +164,11 @@ public sealed partial class LibraryViewModel(
     [RelayCommand]
     public async Task LoadAsync(CancellationToken cancellationToken)
     {
+        if (HasLoaded)
+        {
+            return;
+        }
+
         await LoadFromDatabaseAsync(cancellationToken);
         if (_allItems.Count == 0)
         {
@@ -176,6 +186,7 @@ public sealed partial class LibraryViewModel(
             var items = await libraryService.RefreshAsync(cancellationToken);
             await ReplaceItemsAsync(items, cancellationToken);
             StatusText = $"{Items.Count} titles - {appPaths.VideoLibraryDirectory}";
+            HasLoaded = true;
         }
         finally
         {
@@ -191,6 +202,7 @@ public sealed partial class LibraryViewModel(
             var items = await libraryService.GetLibraryAsync(cancellationToken);
             await ReplaceItemsAsync(items, cancellationToken);
             StatusText = Items.Count == 0 ? $"No titles found - {appPaths.VideoLibraryDirectory}" : $"{Items.Count} titles - {appPaths.VideoLibraryDirectory}";
+            HasLoaded = true;
         }
         finally
         {
@@ -215,7 +227,45 @@ public sealed partial class LibraryViewModel(
     [RelayCommand]
     private void SetCategory(string? category)
     {
-        ActiveCategory = string.Equals(category, "hentai", StringComparison.OrdinalIgnoreCase)
+        ActiveCategory = NormalizeCategory(category);
+    }
+
+    public bool HasLoaded { get; private set; }
+
+    public void ShowHome(string? category = null)
+    {
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            ActiveCategory = NormalizeCategory(category);
+        }
+        else
+        {
+            HomeScrollOffset = GetHomeScrollOffset();
+        }
+
+        IsEpisodeRangeDropdownOpen = false;
+        IsDetailsOpen = false;
+        _detailsCancellation?.Cancel();
+    }
+
+    public void SaveHomeScrollOffset(double offset)
+    {
+        var normalizedCategory = NormalizeCategory(ActiveCategory);
+        var normalizedOffset = double.IsFinite(offset) ? Math.Max(0, offset) : 0;
+        _homeScrollOffsets[normalizedCategory] = normalizedOffset;
+        HomeScrollOffset = normalizedOffset;
+    }
+
+    public double GetHomeScrollOffset()
+    {
+        return _homeScrollOffsets.TryGetValue(NormalizeCategory(ActiveCategory), out var offset)
+            ? offset
+            : 0;
+    }
+
+    private static string NormalizeCategory(string? category)
+    {
+        return string.Equals(category, "hentai", StringComparison.OrdinalIgnoreCase)
             ? "hentai"
             : "anime";
     }
@@ -267,7 +317,10 @@ public sealed partial class LibraryViewModel(
         await Task.WhenAll(tasks);
     }
 
-    public async Task OpenDetailsForMediaAsync(MediaLibraryItem mediaItem, CancellationToken cancellationToken)
+    public async Task OpenDetailsForMediaAsync(
+        MediaLibraryItem mediaItem,
+        CancellationToken cancellationToken,
+        string? sourceCategory = null)
     {
         await LoadFromDatabaseAsync(cancellationToken);
 
@@ -277,7 +330,7 @@ public sealed partial class LibraryViewModel(
             return;
         }
 
-        ActiveCategory = card.Category;
+        ActiveCategory = NormalizeCategory(sourceCategory ?? card.Category);
         await OpenDetailsAsync(card, cancellationToken);
     }
 
@@ -356,7 +409,7 @@ public sealed partial class LibraryViewModel(
             return;
         }
 
-        await navigation.PlayMediaAsync(_selectedCard.Item, cancellationToken);
+        await navigation.PlayMediaAsync(_selectedCard.Item, cancellationToken, ActiveCategory);
     }
 
     private void BuildEpisodeRanges()
@@ -397,6 +450,7 @@ public sealed partial class LibraryViewModel(
                 episode,
                 imagePath,
                 latestWatchedEpisodeId != 0 && episode.Id == latestWatchedEpisodeId,
+                ActiveCategory,
                 imageCache,
                 videoPreviewService,
                 navigation))

@@ -40,7 +40,7 @@ public sealed class DordieWatchLaunchService(
             return;
         }
 
-        await navigation.ShowMediaDetailsAsync(media, cancellationToken);
+        await navigation.ShowMediaDetailsAsync(media, cancellationToken, manifest.Metadata.Type);
     }
 
     private async Task LogAsync(string message, CancellationToken cancellationToken)

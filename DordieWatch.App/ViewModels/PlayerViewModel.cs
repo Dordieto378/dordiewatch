@@ -191,7 +191,7 @@ public sealed partial class PlayerViewModel(
     public async Task OpenAsync(EpisodeItem episode, CancellationToken cancellationToken)
     {
         _episode = episode;
-        Title = $"Episode {episode.EpisodeNumber}";
+        Title = GetNumberedEpisodeTitle(episode);
         ResetEpisodeMenu();
         VolumePercent = player.Volume;
         if (VolumePercent > 0.5)
@@ -575,6 +575,41 @@ public sealed partial class PlayerViewModel(
             : $"{value:mm\\:ss}";
     }
 
+    private static string GetPlayerTitle(
+        EpisodeItem currentEpisode,
+        IReadOnlyList<EpisodeItem> episodes,
+        string? mediaTitle)
+    {
+        if (episodes.Count == 1)
+        {
+            return FirstNonEmpty(
+                mediaTitle,
+                episodes[0].Title,
+                currentEpisode.Title,
+                GetNumberedEpisodeTitle(currentEpisode));
+        }
+
+        return GetNumberedEpisodeTitle(currentEpisode);
+    }
+
+    private static string GetNumberedEpisodeTitle(EpisodeItem episode)
+    {
+        return $"Episode {episode.EpisodeNumber}";
+    }
+
+    private static string FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+
+        return "";
+    }
+
     private async void OnPlaybackEnded(object? sender, EventArgs e)
     {
         if (HasNextEpisode)
@@ -736,6 +771,7 @@ public sealed partial class PlayerViewModel(
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
                 SeriesTitle = mediaItem?.Title ?? "Episodes";
+                Title = GetPlayerTitle(currentEpisode, episodes, mediaItem?.Title);
                 _episodeMenuEpisodes = episodes;
                 _episodeMenuFallbackImagePath = mediaItem?.BackdropPath ?? mediaItem?.PosterPath;
                 OnPropertyChanged(nameof(HasNextEpisode));

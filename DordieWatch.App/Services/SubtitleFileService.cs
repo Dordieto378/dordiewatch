@@ -75,7 +75,7 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
                 return originalPlaybackInfo;
             }
 
-            var cacheKey = $"prepare-ass-v3|{sourceInfo.FullName}|{sourceInfo.Length}|{sourceInfo.LastWriteTimeUtc.Ticks}|{normalizedText is not null}|{usesNetflixSansBold}";
+            var cacheKey = $"prepare-ass-v8|{sourceInfo.FullName}|{sourceInfo.Length}|{sourceInfo.LastWriteTimeUtc.Ticks}|{normalizedText is not null}|{usesNetflixSansBold}";
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cacheKey)))
                 .ToLowerInvariant()[..16];
             var cacheDirectory = Path.Combine(paths.AppDataDirectory, "subtitle-cache", hash);
@@ -275,6 +275,13 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
             if (string.Equals(section, "Script Info", StringComparison.OrdinalIgnoreCase))
             {
                 playResY = TryReadPlayResY(trimmed) ?? playResY;
+                var normalizedLine = NormalizeScriptInfoLine(line);
+                if (!string.Equals(line, normalizedLine, StringComparison.Ordinal))
+                {
+                    lines[index] = normalizedLine;
+                    changed = true;
+                }
+
                 continue;
             }
 
@@ -326,6 +333,11 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
     private static int? TryReadPlayResY(string line)
     {
         const string prefix = "PlayResY:";
+        return TryReadPositiveInt(line, prefix);
+    }
+
+    private static int? TryReadPositiveInt(string line, string prefix)
+    {
         if (!line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
         {
             return null;
@@ -335,6 +347,29 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
             && value > 0
             ? value
             : null;
+    }
+
+    private static string NormalizeScriptInfoLine(string line)
+    {
+        var separatorIndex = line.IndexOf(':');
+        if (separatorIndex < 0)
+        {
+            return line;
+        }
+
+        var name = line[..separatorIndex].Trim();
+        var prefix = line[..(separatorIndex + 1)];
+        if (string.Equals(name, "WrapStyle", StringComparison.OrdinalIgnoreCase))
+        {
+            return prefix + " 0";
+        }
+
+        if (string.Equals(name, "ScaledBorderAndShadow", StringComparison.OrdinalIgnoreCase))
+        {
+            return prefix + " yes";
+        }
+
+        return line;
     }
 
     private static string NormalizeStyleLine(
@@ -364,24 +399,30 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
 
         normalizedStyleNames.Add(fields[nameIndex].Trim());
         fields[fontNameIndex] = NetflixSansBoldFontFamily;
-        SetStyleField(styleFormat, fields, "Fontsize", GetDefaultFontSize(playResY));
-        SetStyleField(styleFormat, fields, "PrimaryColour", "&H00FFFFFF");
-        SetStyleField(styleFormat, fields, "SecondaryColour", "&H000000FF");
-        SetStyleField(styleFormat, fields, "OutlineColour", "&H00000000");
-        SetStyleField(styleFormat, fields, "TertiaryColour", "&H00000000");
-        SetStyleField(styleFormat, fields, "BackColour", "&H80000000");
-        SetStyleField(styleFormat, fields, "Bold", "-1");
-        SetStyleField(styleFormat, fields, "Italic", "0");
-        SetStyleField(styleFormat, fields, "Underline", "0");
-        SetStyleField(styleFormat, fields, "StrikeOut", "0");
-        SetStyleField(styleFormat, fields, "ScaleX", "100");
-        SetStyleField(styleFormat, fields, "ScaleY", "100");
-        SetStyleField(styleFormat, fields, "Spacing", "0");
-        SetStyleField(styleFormat, fields, "Angle", "0");
-        SetStyleField(styleFormat, fields, "BorderStyle", "1");
-        SetStyleField(styleFormat, fields, "Outline", "2");
-        SetStyleField(styleFormat, fields, "Shadow", "0");
-        SetStyleField(styleFormat, fields, "AlphaLevel", "0");
+        SetField(styleFormat, fields, "Fontsize", GetDefaultFontSize(playResY));
+        SetField(styleFormat, fields, "PrimaryColour", "&H00FFFFFF");
+        SetField(styleFormat, fields, "SecondaryColour", "&H000000FF");
+        SetField(styleFormat, fields, "OutlineColour", "&H00000000");
+        SetField(styleFormat, fields, "TertiaryColour", "&H00000000");
+        SetField(styleFormat, fields, "BackColour", "&H80000000");
+        SetField(styleFormat, fields, "Bold", "-1");
+        SetField(styleFormat, fields, "Italic", "0");
+        SetField(styleFormat, fields, "Underline", "0");
+        SetField(styleFormat, fields, "StrikeOut", "0");
+        SetField(styleFormat, fields, "ScaleX", "100");
+        SetField(styleFormat, fields, "ScaleY", "100");
+        SetField(styleFormat, fields, "Spacing", "0");
+        SetField(styleFormat, fields, "Angle", "0");
+        SetField(styleFormat, fields, "BorderStyle", "1");
+        SetField(styleFormat, fields, "Outline", GetDefaultOutline(playResY));
+        SetField(styleFormat, fields, "Shadow", "0");
+        SetField(styleFormat, fields, "Blur", "0");
+        SetField(styleFormat, fields, "AlphaLevel", "0");
+        SetField(styleFormat, fields, "Alignment", "2");
+        SetField(styleFormat, fields, "MarginL", GetDefaultMargin(playResY));
+        SetField(styleFormat, fields, "MarginR", GetDefaultMargin(playResY));
+        SetField(styleFormat, fields, "MarginV", GetDefaultMargin(playResY));
+        SetField(styleFormat, fields, "Encoding", "1");
 
         return prefix + string.Join(",", fields);
     }
@@ -408,6 +449,11 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
         {
             return line;
         }
+
+        SetField(eventFormat, fields, "MarginL", "0000");
+        SetField(eventFormat, fields, "MarginR", "0000");
+        SetField(eventFormat, fields, "MarginV", "0000");
+        SetField(eventFormat, fields, "Effect", "");
 
         fields[textIndex] = OverrideBlockRegex().Replace(fields[textIndex], match =>
         {
@@ -517,6 +563,18 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
         return size.ToString(CultureInfo.InvariantCulture);
     }
 
+    private static string GetDefaultMargin(int playResY)
+    {
+        var margin = Math.Clamp((int)Math.Round(playResY * 0.056), 20, 70);
+        return margin.ToString("D4", CultureInfo.InvariantCulture);
+    }
+
+    private static string GetDefaultOutline(int playResY)
+    {
+        var outline = Math.Clamp(playResY * 0.00185, 0.75, 2.0);
+        return outline.ToString("0.##", CultureInfo.InvariantCulture);
+    }
+
     private static string[] ParseFormat(string line, string prefix)
     {
         var prefixIndex = line.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
@@ -558,13 +616,13 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
         return -1;
     }
 
-    private static void SetStyleField(
-        IReadOnlyList<string> styleFormat,
+    private static void SetField(
+        IReadOnlyList<string> format,
         string[] fields,
         string name,
         string value)
     {
-        var index = FindFormatIndex(styleFormat, name);
+        var index = FindFormatIndex(format, name);
         if (index >= 0 && index < fields.Length)
         {
             fields[index] = value;

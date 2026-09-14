@@ -11,6 +11,7 @@ public sealed partial class EpisodeCardViewModel(
     EpisodeItem episode,
     string? fallbackImagePath,
     bool isLatestWatched,
+    string? returnCategory,
     IImageCache imageCache,
     IVideoPreviewService videoPreviewService,
     INavigationService navigation) : ViewModelBase
@@ -59,6 +60,6 @@ public sealed partial class EpisodeCardViewModel(
     [RelayCommand]
     public Task PlayAsync(CancellationToken cancellationToken)
     {
-        return navigation.PlayEpisodeAsync(episode, cancellationToken);
+        return navigation.PlayEpisodeAsync(episode, cancellationToken, returnCategory);
     }
 }

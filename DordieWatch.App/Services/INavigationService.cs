@@ -6,8 +6,8 @@ public interface INavigationService
 {
     event EventHandler<object?>? CurrentViewModelChanged;
     object? CurrentViewModel { get; }
-    void ShowLibrary();
-    Task ShowMediaDetailsAsync(MediaLibraryItem mediaItem, CancellationToken cancellationToken);
-    Task PlayMediaAsync(MediaLibraryItem mediaItem, CancellationToken cancellationToken);
-    Task PlayEpisodeAsync(EpisodeItem episode, CancellationToken cancellationToken);
+    void ShowLibrary(string? category = null);
+    Task ShowMediaDetailsAsync(MediaLibraryItem mediaItem, CancellationToken cancellationToken, string? sourceCategory = null);
+    Task PlayMediaAsync(MediaLibraryItem mediaItem, CancellationToken cancellationToken, string? sourceCategory = null);
+    Task PlayEpisodeAsync(EpisodeItem episode, CancellationToken cancellationToken, string? sourceCategory = null);
 }

@@ -5,6 +5,7 @@ using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using DordieWatch.App.ViewModels;
 using System;
 using System.ComponentModel;
@@ -21,6 +22,7 @@ public partial class LibraryView : UserControl
     private RenderTargetBitmap? _detailsTransitionBitmap;
     private bool _isPlaybackTransitionRunning;
     private bool _searchPressStartedOutside;
+    private int _homeScrollRestoreVersion;
     private ScaleTransform DetailsScale => (ScaleTransform)DetailsTransitionVisual.RenderTransform!;
     private ScaleTransform LibraryScale => (ScaleTransform)LibrarySurface.RenderTransform!;
 
@@ -29,6 +31,19 @@ public partial class LibraryView : UserControl
         InitializeComponent();
         AddHandler(PointerPressedEvent, OnLibraryPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
         AddHandler(PointerReleasedEvent, OnLibraryPointerReleased, RoutingStrategies.Bubble, handledEventsToo: true);
+    }
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        QueueHomeScrollRestore();
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        SaveHomeScrollOffset();
+        _homeScrollRestoreVersion++;
+        base.OnDetachedFromVisualTree(e);
     }
 
     protected override void OnDataContextChanged(EventArgs e)
@@ -44,6 +59,7 @@ public partial class LibraryView : UserControl
             _viewModel.PropertyChanged += OnViewModelPropertyChanged;
             SetDetailsStateInstant(_viewModel.IsDetailsOpen);
             UpdateHomeGridSizing();
+            QueueHomeScrollRestore();
         }
 
         base.OnDataContextChanged(e);
@@ -94,6 +110,60 @@ public partial class LibraryView : UserControl
                     SearchTextBox.SelectAll();
                 },
                 DispatcherPriority.Input);
+        }
+
+        if (e.PropertyName == nameof(LibraryViewModel.ActiveCategory))
+        {
+            QueueHomeScrollRestore();
+        }
+    }
+
+    private void SaveHomeScrollOffset()
+    {
+        if (_viewModel is null)
+        {
+            return;
+        }
+
+        _viewModel.SaveHomeScrollOffset(LibraryScrollViewer.Offset.Y);
+    }
+
+    private void QueueHomeScrollRestore()
+    {
+        if (_viewModel is null)
+        {
+            return;
+        }
+
+        _homeScrollRestoreVersion++;
+        _ = RestoreHomeScrollOffsetAsync(_viewModel, _homeScrollRestoreVersion);
+    }
+
+    private async Task RestoreHomeScrollOffsetAsync(LibraryViewModel viewModel, int restoreVersion)
+    {
+        var targetOffset = Math.Max(0, viewModel.GetHomeScrollOffset());
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            await Dispatcher.UIThread.InvokeAsync(
+                () => { },
+                DispatcherPriority.Render);
+
+            if (!ReferenceEquals(_viewModel, viewModel) || restoreVersion != _homeScrollRestoreVersion)
+            {
+                return;
+            }
+
+            var maximumOffset = Math.Max(0, LibraryScrollViewer.Extent.Height - LibraryScrollViewer.Viewport.Height);
+            if (maximumOffset > 0 || targetOffset <= 0 || attempt == 4)
+            {
+                LibraryScrollViewer.Offset = new Vector(
+                    LibraryScrollViewer.Offset.X,
+                    maximumOffset > 0 ? Math.Min(targetOffset, maximumOffset) : targetOffset);
+                return;
+            }
+
+            await Task.Delay(16);
         }
     }
 
