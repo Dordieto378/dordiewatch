@@ -59,8 +59,10 @@ public sealed partial class LibraryViewModel(
     private double _homePosterImageHeight = 285;
 
     public string AnimeNavForeground => ActiveCategory == "anime" ? "#FFFFFF" : "#A8A8A8";
+    public string MovieNavForeground => ActiveCategory == "movie" ? "#FFFFFF" : "#A8A8A8";
     public string HentaiNavForeground => ActiveCategory == "hentai" ? "#FFFFFF" : "#A8A8A8";
     public bool IsAnimeActive => ActiveCategory == "anime";
+    public bool IsMovieActive => ActiveCategory == "movie";
     public bool IsHentaiActive => ActiveCategory == "hentai";
     public double SearchControlWidth => IsSearchOpen ? 400 : 56;
     public double SearchPanelOpacity => IsSearchOpen ? 1 : 0;
@@ -69,8 +71,10 @@ public sealed partial class LibraryViewModel(
     {
         HomeScrollOffset = GetHomeScrollOffset();
         OnPropertyChanged(nameof(AnimeNavForeground));
+        OnPropertyChanged(nameof(MovieNavForeground));
         OnPropertyChanged(nameof(HentaiNavForeground));
         OnPropertyChanged(nameof(IsAnimeActive));
+        OnPropertyChanged(nameof(IsMovieActive));
         OnPropertyChanged(nameof(IsHentaiActive));
         ApplyCategoryFilter();
         _ = LoadPostersAsync(CancellationToken.None);
@@ -170,10 +174,7 @@ public sealed partial class LibraryViewModel(
         }
 
         await LoadFromDatabaseAsync(cancellationToken);
-        if (_allItems.Count == 0 || HasMissingLibraryFolders())
-        {
-            await RefreshAsync(cancellationToken);
-        }
+        await RefreshAsync(cancellationToken);
     }
 
     [RelayCommand]
@@ -224,11 +225,6 @@ public sealed partial class LibraryViewModel(
         await LoadPostersAsync(_loadCancellation.Token);
     }
 
-    private bool HasMissingLibraryFolders()
-    {
-        return _allItems.Any(item => !Directory.Exists(item.Item.FolderPath));
-    }
-
     [RelayCommand]
     private void SetCategory(string? category)
     {
@@ -270,9 +266,12 @@ public sealed partial class LibraryViewModel(
 
     private static string NormalizeCategory(string? category)
     {
-        return string.Equals(category, "hentai", StringComparison.OrdinalIgnoreCase)
-            ? "hentai"
-            : "anime";
+        return category?.Trim().ToLowerInvariant() switch
+        {
+            "hentai" => "hentai",
+            "movie" or "movies" => "movie",
+            _ => "anime"
+        };
     }
 
     [RelayCommand]

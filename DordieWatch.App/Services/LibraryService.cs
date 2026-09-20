@@ -270,9 +270,12 @@ public sealed class LibraryService(
 
     private static string NormalizeCategory(string? category)
     {
-        return string.Equals(category, "hentai", StringComparison.OrdinalIgnoreCase)
-            ? "hentai"
-            : "anime";
+        return category?.Trim().ToLowerInvariant() switch
+        {
+            "hentai" => "hentai",
+            "movie" or "movies" => "movie",
+            _ => "anime"
+        };
     }
 
     private static IReadOnlyList<int> DeserializeWebsiteIds(string value)

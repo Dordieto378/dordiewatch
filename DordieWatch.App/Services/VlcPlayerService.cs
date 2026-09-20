@@ -1,5 +1,6 @@
 using LibVLCSharp.Shared;
 using DordieWatch.App.Models;
+using System.Diagnostics;
 
 namespace DordieWatch.App.Services;
 
@@ -14,6 +15,9 @@ public sealed class VlcPlayerService : IPlayerService
     private string? _selectedExternalSubtitlePath;
     private string? _selectedPlaybackSubtitlePath;
     private string? _selectedSubtitleFontDirectory;
+    private ProcessPriorityClass? _originalProcessPriority;
+    private int _playbackReadySignaled = 1;
+    private int _startupSeekPending;
 
     public VlcPlayerService(LibVLC libVlc, ISubtitleFileService subtitleFileService)
     {
@@ -22,9 +26,22 @@ public sealed class VlcPlayerService : IPlayerService
         MediaPlayer = new MediaPlayer(_libVlc);
         MediaPlayer.EnableKeyInput = false;
         ApplyVolume();
-        MediaPlayer.TimeChanged += (_, _) => PositionChanged?.Invoke(this, EventArgs.Empty);
+        MediaPlayer.TimeChanged += (_, _) =>
+        {
+            PositionChanged?.Invoke(this, EventArgs.Empty);
+            if (Volatile.Read(ref _startupSeekPending) == 0
+                && MediaPlayer.VoutCount > 0
+                && Interlocked.Exchange(ref _playbackReadySignaled, 1) == 0)
+            {
+                PlaybackReady?.Invoke(this, EventArgs.Empty);
+            }
+        };
         MediaPlayer.LengthChanged += (_, _) => PositionChanged?.Invoke(this, EventArgs.Empty);
-        MediaPlayer.EndReached += (_, _) => PlaybackEnded?.Invoke(this, EventArgs.Empty);
+        MediaPlayer.EndReached += (_, _) =>
+        {
+            RestoreProcessPriority();
+            PlaybackEnded?.Invoke(this, EventArgs.Empty);
+        };
         MediaPlayer.Playing += (_, _) =>
         {
             PlaybackStarted?.Invoke(this, EventArgs.Empty);
@@ -39,6 +56,7 @@ public sealed class VlcPlayerService : IPlayerService
     public event EventHandler? PositionChanged;
     public event EventHandler? PlaybackEnded;
     public event EventHandler? PlaybackStarted;
+    public event EventHandler? PlaybackReady;
     public event EventHandler? TracksChanged;
 
     public TimeSpan Position => TimeSpan.FromMilliseconds(Math.Max(0, MediaPlayer.Time));
@@ -103,6 +121,7 @@ public sealed class VlcPlayerService : IPlayerService
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         MediaPlayer.Stop();
+        RestoreProcessPriority();
     }
 
     public IReadOnlyList<PlaybackTrackInfo> GetAudioTracks()
@@ -200,6 +219,9 @@ public sealed class VlcPlayerService : IPlayerService
     private void StartMedia(string videoPath, string? subtitlePath, string? subtitleFontDirectory, TimeSpan startPosition)
     {
         var generation = Interlocked.Increment(ref _playbackGeneration);
+        Interlocked.Exchange(ref _playbackReadySignaled, 0);
+        Interlocked.Exchange(ref _startupSeekPending, startPosition > TimeSpan.Zero ? 1 : 0);
+        PreferPlaybackPerformance();
         using var media = new Media(_libVlc, new Uri(videoPath));
         media.AddOption(":no-sub-autodetect-file");
         media.AddOption(":sub-track=-1");
@@ -234,6 +256,43 @@ public sealed class VlcPlayerService : IPlayerService
         }
     }
 
+    private void PreferPlaybackPerformance()
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            _originalProcessPriority ??= process.PriorityClass;
+            process.PriorityClass = ProcessPriorityClass.AboveNormal;
+        }
+        catch
+        {
+            // Playback still works when the OS does not permit priority changes.
+        }
+    }
+
+    private void RestoreProcessPriority()
+    {
+        var originalPriority = _originalProcessPriority;
+        if (originalPriority is null)
+        {
+            return;
+        }
+
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            process.PriorityClass = originalPriority.Value;
+        }
+        catch
+        {
+            // The process may be shutting down or priority changes may be denied.
+        }
+        finally
+        {
+            _originalProcessPriority = null;
+        }
+    }
+
     private async Task SeekAfterPlaybackStartsAsync(TimeSpan startPosition, long generation)
     {
         try
@@ -241,6 +300,7 @@ public sealed class VlcPlayerService : IPlayerService
             await Task.Delay(350).ConfigureAwait(false);
             if (!_disposed && generation == Interlocked.Read(ref _playbackGeneration))
             {
+                Interlocked.Exchange(ref _startupSeekPending, 0);
                 Seek(startPosition);
             }
         }
@@ -340,6 +400,7 @@ public sealed class VlcPlayerService : IPlayerService
 
         _disposed = true;
         MediaPlayer.Stop();
+        RestoreProcessPriority();
         MediaPlayer.Dispose();
     }
 }

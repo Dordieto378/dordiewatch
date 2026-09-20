@@ -9,6 +9,7 @@ public interface IPlayerService : IDisposable
     event EventHandler? PositionChanged;
     event EventHandler? PlaybackEnded;
     event EventHandler? PlaybackStarted;
+    event EventHandler? PlaybackReady;
     event EventHandler? TracksChanged;
     void Play(string videoPath, TimeSpan startPosition, string? subtitlePath = null);
     void TogglePause();

@@ -130,8 +130,11 @@ public sealed class NavigationService(
             return null;
         }
 
-        return string.Equals(category, "hentai", StringComparison.OrdinalIgnoreCase)
-            ? "hentai"
-            : "anime";
+        return category.Trim().ToLowerInvariant() switch
+        {
+            "hentai" => "hentai",
+            "movie" or "movies" => "movie",
+            _ => "anime"
+        };
     }
 }

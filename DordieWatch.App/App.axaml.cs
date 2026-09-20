@@ -70,6 +70,9 @@ public partial class App : Application
             Core.Initialize();
             return new LibVLC(
                 "--avcodec-hw=any",
+                "--vout=direct3d11",
+                "--drop-late-frames",
+                "--skip-frames",
                 "--no-video-title-show",
                 "--no-osd");
         });

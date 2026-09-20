@@ -25,6 +25,9 @@ public sealed partial class PlayerViewModel(
     private readonly List<Bitmap> _timelinePreviewFrames = [];
     private CancellationTokenSource? _episodeMenuCancellation;
     private CancellationTokenSource? _timelinePreviewCancellation;
+    private string? _timelinePreviewVideoPath;
+    private int _timelinePreviewLoadStarted;
+    private int _positionUpdateQueued;
     private IReadOnlyList<EpisodeItem> _episodeMenuEpisodes = [];
     private IReadOnlyList<ExternalSubtitleInfo> _externalSubtitles = [];
     private string? _episodeMenuFallbackImagePath;
@@ -58,6 +61,9 @@ public sealed partial class PlayerViewModel(
 
     [ObservableProperty]
     private TimeSpan _duration;
+
+    [ObservableProperty]
+    private bool _isPlaybackLoading = true;
 
     [ObservableProperty]
     private bool _isTimelinePreviewVisible;
@@ -122,6 +128,17 @@ public sealed partial class PlayerViewModel(
     partial void OnTimelinePreviewImageChanged(Bitmap? value)
     {
         OnPropertyChanged(nameof(HasTimelinePreviewImage));
+    }
+
+    partial void OnPositionChanged(TimeSpan value)
+    {
+        OnPropertyChanged(nameof(PositionSeconds));
+    }
+
+    partial void OnDurationChanged(TimeSpan value)
+    {
+        OnPropertyChanged(nameof(DurationSeconds));
+        OnPropertyChanged(nameof(TimeText));
     }
 
     partial void OnVolumePercentChanged(double value)
@@ -225,6 +242,7 @@ public sealed partial class PlayerViewModel(
         {
             player.PositionChanged += OnPositionChanged;
             player.PlaybackEnded += OnPlaybackEnded;
+            player.PlaybackReady += OnPlaybackReady;
             player.TracksChanged += OnTracksChanged;
             _eventsSubscribed = true;
         }
@@ -243,6 +261,7 @@ public sealed partial class PlayerViewModel(
         _selectedExternalSubtitlePath = preferredSubtitle?.Path;
         _preferredAudioTrackPending = !string.IsNullOrWhiteSpace(preferredAudioTrack);
         RefreshSubtitleTrackOptions();
+        IsPlaybackLoading = true;
         player.Play(episode.VideoPath, episode.Position, preferredSubtitle?.Path);
         if (!_saveLoopStarted)
         {
@@ -253,7 +272,10 @@ public sealed partial class PlayerViewModel(
         _timelinePreviewCancellation?.Cancel();
         _timelinePreviewCancellation?.Dispose();
         _timelinePreviewCancellation = CancellationTokenSource.CreateLinkedTokenSource(_disposeCancellation.Token);
-        _ = LoadTimelinePreviewFramesAsync(episode.VideoPath, _timelinePreviewCancellation.Token);
+        _timelinePreviewVideoPath = episode.VideoPath;
+        Interlocked.Exchange(ref _timelinePreviewLoadStarted, 0);
+        _timelinePreviewFrames.Clear();
+        TimelinePreviewImage = null;
         _ = LoadEpisodeMenuAsync(episode);
     }
 
@@ -316,6 +338,8 @@ public sealed partial class PlayerViewModel(
 
     public void UpdateTimelinePreview(double pointerX, double timelineWidth)
     {
+        EnsureTimelinePreviewLoading();
+
         if (timelineWidth <= 0 || DurationSeconds <= 1)
         {
             IsTimelinePreviewVisible = false;
@@ -446,6 +470,7 @@ public sealed partial class PlayerViewModel(
 
     public void SelectSubtitleOption(PlayerTrackOptionViewModel option)
     {
+        IsPlaybackLoading = true;
         if (player.SelectSubtitleFile(option.SubtitlePath))
         {
             _selectedExternalSubtitlePath = option.SubtitlePath;
@@ -462,7 +487,10 @@ public sealed partial class PlayerViewModel(
                 selectedLanguage);
             RefreshPlaybackTracks();
             HideTrackMenu();
+            return;
         }
+
+        IsPlaybackLoading = false;
     }
 
     public void HideEpisodesMenu()
@@ -580,17 +608,39 @@ public sealed partial class PlayerViewModel(
 
     private void OnPositionChanged(object? sender, EventArgs e)
     {
-        Position = player.Position;
-        Duration = player.Duration;
-        OnPropertyChanged(nameof(PositionSeconds));
-        OnPropertyChanged(nameof(DurationSeconds));
-        OnPropertyChanged(nameof(TimeText));
-        OnPropertyChanged(nameof(IsPlaying));
+        if (Interlocked.Exchange(ref _positionUpdateQueued, 1) != 0)
+        {
+            return;
+        }
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            Interlocked.Exchange(ref _positionUpdateQueued, 0);
+            if (Volatile.Read(ref _disposeState) != 0)
+            {
+                return;
+            }
+
+            Position = player.Position;
+            Duration = player.Duration;
+        }, DispatcherPriority.Background);
     }
 
     private void OnTracksChanged(object? sender, EventArgs e)
     {
         Dispatcher.UIThread.Post(RefreshPlaybackTracks);
+    }
+
+    private void OnPlaybackReady(object? sender, EventArgs e)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (Volatile.Read(ref _disposeState) == 0)
+            {
+                IsPlaybackLoading = false;
+                OnPropertyChanged(nameof(IsPlaying));
+            }
+        });
     }
 
     private void RefreshPlaybackTracks()
@@ -828,6 +878,20 @@ public sealed partial class PlayerViewModel(
         {
             // Preview thumbnails are optional. The timeline still works without them.
         }
+    }
+
+    private void EnsureTimelinePreviewLoading()
+    {
+        var videoPath = _timelinePreviewVideoPath;
+        var cancellation = _timelinePreviewCancellation;
+        if (string.IsNullOrWhiteSpace(videoPath)
+            || cancellation is null
+            || Interlocked.Exchange(ref _timelinePreviewLoadStarted, 1) != 0)
+        {
+            return;
+        }
+
+        _ = LoadTimelinePreviewFramesAsync(videoPath, cancellation.Token);
     }
 
     private async Task<ExternalSubtitleInfo?> FindPreferredSubtitleAsync(
@@ -1096,6 +1160,7 @@ public sealed partial class PlayerViewModel(
         {
             player.PositionChanged -= OnPositionChanged;
             player.PlaybackEnded -= OnPlaybackEnded;
+            player.PlaybackReady -= OnPlaybackReady;
             player.TracksChanged -= OnTracksChanged;
         }
     }

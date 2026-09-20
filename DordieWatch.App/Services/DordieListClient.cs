@@ -299,15 +299,18 @@ public sealed class DordieListClient(IAppPaths paths) : IDordieListClient, IDisp
 
     private static bool IsSupportedType(string? type)
     {
-        var normalized = NormalizeType(type);
-        return normalized is "anime" or "hentai";
+        var normalized = type?.Trim().ToLowerInvariant();
+        return normalized is "anime" or "hentai" or "movie" or "movies";
     }
 
     private static string NormalizeType(string? type)
     {
-        return string.Equals(type, "hentai", StringComparison.OrdinalIgnoreCase)
-            ? "hentai"
-            : "anime";
+        return type?.Trim().ToLowerInvariant() switch
+        {
+            "hentai" => "hentai",
+            "movie" or "movies" => "movie",
+            _ => "anime"
+        };
     }
 
     private sealed record DordieListLibraryRequest(

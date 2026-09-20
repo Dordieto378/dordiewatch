@@ -106,6 +106,16 @@ public sealed class VideoPreviewService(IAppPaths paths) : IVideoPreviewService
                 return false;
             }
 
+            try
+            {
+                // Preview extraction must yield CPU time to active video playback.
+                process.PriorityClass = ProcessPriorityClass.BelowNormal;
+            }
+            catch
+            {
+                // Some environments do not allow changing process priority.
+            }
+
             if (!process.WaitForExit(12_000))
             {
                 try

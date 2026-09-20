@@ -10,6 +10,7 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
 {
     private const string SubtitleRootFolderName = "subs";
     private const string AssExtension = ".ass";
+    private const int DefaultPlayResX = 1920;
     private const int DefaultPlayResY = 1080;
     private const string NetflixSansBoldFontFamily = "Netflix Sans";
     private const string NetflixSansBoldFontFileName = "NetflixSans-Bold.otf";
@@ -66,16 +67,16 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
 
         try
         {
-            var normalizedText = NormalizeAss(subtitlePath);
             var sourceInfo = new FileInfo(subtitlePath);
             var hasFontFiles = HasSiblingFontFiles(sourceInfo.DirectoryName);
             var usesNetflixSansBold = UsesNetflixSansBold(subtitlePath);
+            var normalizedText = NormalizeAss(subtitlePath, usesNetflixSansBold);
             if (normalizedText is null && !hasFontFiles && !usesNetflixSansBold)
             {
                 return originalPlaybackInfo;
             }
 
-            var cacheKey = $"prepare-ass-v8|{sourceInfo.FullName}|{sourceInfo.Length}|{sourceInfo.LastWriteTimeUtc.Ticks}|{normalizedText is not null}|{usesNetflixSansBold}";
+            var cacheKey = $"prepare-ass-v11|{sourceInfo.FullName}|{sourceInfo.Length}|{sourceInfo.LastWriteTimeUtc.Ticks}|{normalizedText is not null}|{usesNetflixSansBold}";
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cacheKey)))
                 .ToLowerInvariant()[..16];
             var cacheDirectory = Path.Combine(paths.AppDataDirectory, "subtitle-cache", hash);
@@ -247,21 +248,22 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
             Path.GetDirectoryName(subtitlePath) ?? "");
     }
 
-    private static string? NormalizeAss(string subtitlePath)
+    private static string? NormalizeAss(string subtitlePath, bool normalizeNetflixStyles)
     {
         var text = File.ReadAllText(subtitlePath);
         var newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
         var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace('\r', '\n')
-            .Split('\n');
-        var changed = false;
+            .Split('\n')
+            .ToList();
+        var changed = normalizeNetflixStyles && EnsureScriptResolution(lines);
         var section = "";
         var playResY = DefaultPlayResY;
         var styleFormat = Array.Empty<string>();
         var eventFormat = Array.Empty<string>();
         var normalizedStyleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        for (var index = 0; index < lines.Length; index++)
+        for (var index = 0; index < lines.Count; index++)
         {
             var line = lines[index];
             var trimmed = line.Trim();
@@ -296,7 +298,11 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
 
                 if (trimmed.StartsWith("Style:", StringComparison.OrdinalIgnoreCase))
                 {
-                    var normalizedLine = NormalizeStyleLine(line, styleFormat, playResY, normalizedStyleNames);
+                    var normalizedLine = NormalizeStyleLine(
+                        line,
+                        styleFormat,
+                        playResY,
+                        normalizedStyleNames);
                     if (!string.Equals(line, normalizedLine, StringComparison.Ordinal))
                     {
                         lines[index] = normalizedLine;
@@ -334,6 +340,64 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
     {
         const string prefix = "PlayResY:";
         return TryReadPositiveInt(line, prefix);
+    }
+
+    private static bool EnsureScriptResolution(List<string> lines)
+    {
+        var scriptInfoIndex = lines.FindIndex(line =>
+            string.Equals(line.Trim(), "[Script Info]", StringComparison.OrdinalIgnoreCase));
+        if (scriptInfoIndex < 0)
+        {
+            lines.InsertRange(0,
+            [
+                "[Script Info]",
+                "ScriptType: v4.00+",
+                $"PlayResX: {DefaultPlayResX}",
+                $"PlayResY: {DefaultPlayResY}",
+                ""
+            ]);
+            return true;
+        }
+
+        var sectionEnd = lines.FindIndex(
+            scriptInfoIndex + 1,
+            line => line.TrimStart().StartsWith("[", StringComparison.Ordinal));
+        if (sectionEnd < 0)
+        {
+            sectionEnd = lines.Count;
+        }
+
+        var hasPlayResX = false;
+        var hasPlayResY = false;
+        for (var index = scriptInfoIndex + 1; index < sectionEnd; index++)
+        {
+            var line = lines[index].Trim();
+            hasPlayResX |= line.StartsWith("PlayResX:", StringComparison.OrdinalIgnoreCase);
+            hasPlayResY |= line.StartsWith("PlayResY:", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (hasPlayResX && hasPlayResY)
+        {
+            return false;
+        }
+
+        var insertIndex = sectionEnd;
+        while (insertIndex > scriptInfoIndex + 1 && string.IsNullOrWhiteSpace(lines[insertIndex - 1]))
+        {
+            insertIndex--;
+        }
+
+        if (!hasPlayResX)
+        {
+            lines.Insert(insertIndex++, $"PlayResX: {DefaultPlayResX}");
+        }
+
+        if (!hasPlayResY)
+        {
+            lines.Insert(insertIndex, $"PlayResY: {DefaultPlayResY}");
+        }
+
+        return true;
     }
 
     private static int? TryReadPositiveInt(string line, string prefix)
@@ -559,19 +623,19 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
 
     private static string GetDefaultFontSize(int playResY)
     {
-        var size = Math.Clamp((int)Math.Round(playResY * 0.064), 28, 82);
+        var size = Math.Max(1, (int)Math.Round(playResY * 0.064));
         return size.ToString(CultureInfo.InvariantCulture);
     }
 
     private static string GetDefaultMargin(int playResY)
     {
-        var margin = Math.Clamp((int)Math.Round(playResY * 0.056), 20, 70);
+        var margin = Math.Max(1, (int)Math.Round(playResY * 0.056));
         return margin.ToString("D4", CultureInfo.InvariantCulture);
     }
 
     private static string GetDefaultOutline(int playResY)
     {
-        var outline = Math.Clamp(playResY * 0.00185, 0.75, 2.0);
+        var outline = Math.Max(0.1, playResY * 0.00185);
         return outline.ToString("0.##", CultureInfo.InvariantCulture);
     }
 

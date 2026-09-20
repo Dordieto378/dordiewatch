@@ -395,6 +395,12 @@
               CommandParameter="anime" />
           <Button
               Classes="mediaTab"
+              Content="Movies"
+              Foreground="{Binding MovieNavForeground}"
+              Command="{Binding SetCategoryCommand}"
+              CommandParameter="movie" />
+          <Button
+              Classes="mediaTab"
               Content="Hentai"
               Foreground="{Binding HentaiNavForeground}"
               Command="{Binding SetCategoryCommand}"

@@ -15,6 +15,7 @@ public partial class PlayerControlsOverlayWindow : Window
     private bool _isDraggingTimeline;
     private bool _isDraggingVolume;
     private bool _areControlsVisible = true;
+    private bool _timelineVisualUpdateQueued;
     private bool _isFullscreen;
     private PixelPoint? _lastPointerScreenPosition;
     private readonly DispatcherTimer _controlsHideTimer;
@@ -43,10 +44,10 @@ public partial class PlayerControlsOverlayWindow : Window
         _hiddenCursor = new Cursor(StandardCursorType.None);
         _controlsHideTimer = new DispatcherTimer { Interval = ControlsIdleDelay };
         _controlsHideTimer.Tick += OnControlsHideTimerTick;
-        _loadingSpinnerTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
+        _loadingSpinnerTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
         _loadingSpinnerTimer.Tick += (_, _) =>
         {
-            LoadingSpinnerRotation.Angle = (LoadingSpinnerRotation.Angle + 7) % 360;
+            LoadingSpinnerRotation.Angle = (LoadingSpinnerRotation.Angle + 14) % 360;
         };
         DataContextChanged += OnDataContextChanged;
         RootLayer.AddHandler(PointerPressedEvent, OnRootPointerPressed, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
@@ -300,6 +301,7 @@ public partial class PlayerControlsOverlayWindow : Window
 
         UpdateTimelineVisual();
         UpdateVolumeVisual();
+        UpdatePlaybackLoadingVisual();
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -309,12 +311,17 @@ public partial class PlayerControlsOverlayWindow : Window
             or nameof(PlayerViewModel.PositionSeconds)
             or nameof(PlayerViewModel.DurationSeconds))
         {
-            Dispatcher.UIThread.Post(UpdateTimelineVisual);
+            QueueTimelineVisualUpdate();
         }
 
         if (e.PropertyName is nameof(PlayerViewModel.VolumePercent))
         {
             Dispatcher.UIThread.Post(UpdateVolumeVisual);
+        }
+
+        if (e.PropertyName is nameof(PlayerViewModel.IsPlaybackLoading))
+        {
+            Dispatcher.UIThread.Post(UpdatePlaybackLoadingVisual);
         }
     }
 
@@ -404,6 +411,24 @@ public partial class PlayerControlsOverlayWindow : Window
         e.Handled = true;
     }
 
+    private void QueueTimelineVisualUpdate()
+    {
+        if (!_areControlsVisible || _timelineVisualUpdateQueued)
+        {
+            return;
+        }
+
+        _timelineVisualUpdateQueued = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _timelineVisualUpdateQueued = false;
+            if (_areControlsVisible)
+            {
+                UpdateTimelineVisual();
+            }
+        }, DispatcherPriority.Background);
+    }
+
     private async void OnNextEpisodeButtonClick(object? sender, RoutedEventArgs e)
     {
         e.Handled = true;
@@ -422,38 +447,26 @@ public partial class PlayerControlsOverlayWindow : Window
             return;
         }
 
-        await ShowPlaybackLoadingAsync();
-        try
-        {
-            await _viewModel.PlayNextEpisodeAsync();
-            await Task.Delay(180);
-        }
-        finally
-        {
-            await HidePlaybackLoadingAsync();
-        }
+        await _viewModel.PlayNextEpisodeAsync();
     }
 
-    private async Task ShowPlaybackLoadingAsync()
+    private void UpdatePlaybackLoadingVisual()
     {
-        _controlsHideTimer.Stop();
-        SetControlsVisible(false);
-        PlaybackLoadingLayer.Opacity = 0;
-        PlaybackLoadingLayer.IsVisible = true;
-        await Task.Delay(16);
-        PlaybackLoadingLayer.Opacity = 1;
-        await Task.Delay(240);
-        LoadingSpinnerRotation.Angle = 0;
-        LoadingSpinner.IsVisible = true;
-        _loadingSpinnerTimer.Start();
-    }
+        if (_viewModel?.IsPlaybackLoading == true)
+        {
+            _controlsHideTimer.Stop();
+            SetControlsVisible(false);
+            PlaybackLoadingLayer.IsVisible = true;
+            PlaybackLoadingLayer.Opacity = 1;
+            LoadingSpinnerRotation.Angle = 0;
+            LoadingSpinner.IsVisible = true;
+            _loadingSpinnerTimer.Start();
+            return;
+        }
 
-    private async Task HidePlaybackLoadingAsync()
-    {
         _loadingSpinnerTimer.Stop();
         LoadingSpinner.IsVisible = false;
         PlaybackLoadingLayer.Opacity = 0;
-        await Task.Delay(240);
         PlaybackLoadingLayer.IsVisible = false;
         RegisterControlsActivity();
     }
