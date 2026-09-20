@@ -21,7 +21,12 @@ videos/
 *.srt
 
 # App/runtime caches
+.appdata/
+.dotnet/
+.dotnet_home/
+.nuget/
 .tmp_reference_frames/
+host-trace.txt
 *.log
 *.db
 *.sqlite

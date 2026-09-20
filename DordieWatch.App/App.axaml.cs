@@ -125,5 +125,14 @@ public partial class App : Application
         {
             // Column already exists or the DB was freshly created with the current schema.
         }
+
+        try
+        {
+            db.Database.ExecuteSqlRaw("ALTER TABLE MediaItems ADD COLUMN PreferredAudioTrack TEXT NULL");
+        }
+        catch
+        {
+            // Column already exists or the DB was freshly created with the current schema.
+        }
     }
 }

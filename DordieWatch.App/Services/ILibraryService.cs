@@ -11,4 +11,6 @@ public interface ILibraryService
     Task SaveProgressAsync(long episodeId, TimeSpan position, TimeSpan duration, CancellationToken cancellationToken);
     Task<string?> GetPreferredSubtitleLanguageAsync(long mediaItemId, CancellationToken cancellationToken);
     Task SavePreferredSubtitleLanguageAsync(long mediaItemId, string? language, CancellationToken cancellationToken);
+    Task<string?> GetPreferredAudioTrackAsync(long mediaItemId, CancellationToken cancellationToken);
+    Task SavePreferredAudioTrackAsync(long mediaItemId, string track, CancellationToken cancellationToken);
 }

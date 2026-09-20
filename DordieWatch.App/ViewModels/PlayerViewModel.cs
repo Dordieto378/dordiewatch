@@ -31,6 +31,9 @@ public sealed partial class PlayerViewModel(
     private string? _selectedExternalSubtitlePath;
     private long? _cachedPreferredSubtitleMediaItemId;
     private string? _cachedPreferredSubtitleLanguage;
+    private long? _cachedPreferredAudioMediaItemId;
+    private string? _cachedPreferredAudioTrack;
+    private bool _preferredAudioTrackPending;
     private bool _isChangingEpisode;
     private bool _saveLoopStarted;
     private int _disposeState;
@@ -233,8 +236,12 @@ public sealed partial class PlayerViewModel(
             episode.MediaItemId,
             _externalSubtitles,
             cancellationToken);
+        var preferredAudioTrack = await GetPreferredAudioTrackAsync(
+            episode.MediaItemId,
+            cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         _selectedExternalSubtitlePath = preferredSubtitle?.Path;
+        _preferredAudioTrackPending = !string.IsNullOrWhiteSpace(preferredAudioTrack);
         RefreshSubtitleTrackOptions();
         player.Play(episode.VideoPath, episode.Position, preferredSubtitle?.Path);
         if (!_saveLoopStarted)
@@ -253,6 +260,11 @@ public sealed partial class PlayerViewModel(
     [RelayCommand]
     private void TogglePause()
     {
+        TogglePausePlayback();
+    }
+
+    public void TogglePausePlayback()
+    {
         player.TogglePause();
         OnPropertyChanged(nameof(IsPlaying));
         _ = RefreshIsPlayingAsync();
@@ -261,12 +273,22 @@ public sealed partial class PlayerViewModel(
     [RelayCommand]
     private void SkipBackward()
     {
+        SkipBackwardPlayback();
+    }
+
+    public void SkipBackwardPlayback()
+    {
         var target = player.Position - TimeSpan.FromSeconds(10);
         player.Seek(target < TimeSpan.Zero ? TimeSpan.Zero : target);
     }
 
     [RelayCommand]
     private void SkipForward()
+    {
+        SkipForwardPlayback();
+    }
+
+    public void SkipForwardPlayback()
     {
         var target = player.Position + TimeSpan.FromSeconds(10);
         var duration = player.Duration;
@@ -408,6 +430,15 @@ public sealed partial class PlayerViewModel(
     {
         if (player.SelectAudioTrack(option.Id))
         {
+            _preferredAudioTrackPending = false;
+            var mediaItemId = _episode?.MediaItemId;
+            if (mediaItemId is not null)
+            {
+                _cachedPreferredAudioMediaItemId = mediaItemId;
+                _cachedPreferredAudioTrack = option.PreferenceKey;
+            }
+
+            _ = SavePreferredAudioTrackAsync(mediaItemId, option.PreferenceKey);
             RefreshPlaybackTracks();
             HideTrackMenu();
         }
@@ -564,8 +595,46 @@ public sealed partial class PlayerViewModel(
 
     private void RefreshPlaybackTracks()
     {
+        TryApplyPreferredAudioTrack();
         RefreshAudioTrackOptions();
         RefreshSubtitleTrackOptions();
+    }
+
+    private void TryApplyPreferredAudioTrack()
+    {
+        if (!_preferredAudioTrackPending || string.IsNullOrWhiteSpace(_cachedPreferredAudioTrack))
+        {
+            return;
+        }
+
+        try
+        {
+            var tracks = player.GetAudioTracks();
+            var preferredTrack = tracks.FirstOrDefault(track =>
+                    string.Equals(
+                        track.PreferenceKey,
+                        _cachedPreferredAudioTrack,
+                        StringComparison.OrdinalIgnoreCase))
+                ?? tracks.FirstOrDefault(track =>
+                    string.Equals(
+                        track.Name,
+                        _cachedPreferredAudioTrack,
+                        StringComparison.OrdinalIgnoreCase));
+            if (preferredTrack is null)
+            {
+                return;
+            }
+
+            _preferredAudioTrackPending = false;
+            if (!player.SelectAudioTrack(preferredTrack.Id))
+            {
+                _preferredAudioTrackPending = true;
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // Native track events can arrive while the player is closing.
+        }
     }
 
     private void RefreshAudioTrackOptions()
@@ -621,7 +690,8 @@ public sealed partial class PlayerViewModel(
                 track.Id,
                 track.Name,
                 track.Id == selectedTrackId,
-                track.SubtitlePath));
+                track.SubtitlePath,
+                track.PreferenceKey));
         }
     }
 
@@ -807,6 +877,49 @@ public sealed partial class PlayerViewModel(
             await libraryService.SavePreferredSubtitleLanguageAsync(
                 mediaItemId.Value,
                 language,
+                CancellationToken.None);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Expected if the app is closing while the preference save is in flight.
+        }
+    }
+
+    private async Task<string?> GetPreferredAudioTrackAsync(
+        long mediaItemId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var preferredTrack = _cachedPreferredAudioMediaItemId == mediaItemId
+                ? _cachedPreferredAudioTrack
+                : await libraryService.GetPreferredAudioTrackAsync(mediaItemId, cancellationToken);
+            _cachedPreferredAudioMediaItemId = mediaItemId;
+            _cachedPreferredAudioTrack = preferredTrack;
+            return preferredTrack;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task SavePreferredAudioTrackAsync(long? mediaItemId, string track)
+    {
+        if (mediaItemId is null || string.IsNullOrWhiteSpace(track))
+        {
+            return;
+        }
+
+        try
+        {
+            await libraryService.SavePreferredAudioTrackAsync(
+                mediaItemId.Value,
+                track,
                 CancellationToken.None);
         }
         catch (ObjectDisposedException)

@@ -179,7 +179,10 @@
     </Style>
   </Window.Styles>
 
-  <Grid x:Name="RootLayer" Background="Transparent">
+  <Grid
+      x:Name="RootLayer"
+      Background="Transparent"
+      Focusable="True">
     <Button
         x:Name="BackButton"
         Classes="playerIcon"

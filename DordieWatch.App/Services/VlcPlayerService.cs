@@ -20,6 +20,7 @@ public sealed class VlcPlayerService : IPlayerService
         _libVlc = libVlc;
         _subtitleFileService = subtitleFileService;
         MediaPlayer = new MediaPlayer(_libVlc);
+        MediaPlayer.EnableKeyInput = false;
         ApplyVolume();
         MediaPlayer.TimeChanged += (_, _) => PositionChanged?.Invoke(this, EventArgs.Empty);
         MediaPlayer.LengthChanged += (_, _) => PositionChanged?.Invoke(this, EventArgs.Empty);
@@ -95,6 +96,7 @@ public sealed class VlcPlayerService : IPlayerService
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         MediaPlayer.Time = (long)Math.Max(0, position.TotalMilliseconds);
+        PositionChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void Stop()
@@ -107,9 +109,17 @@ public sealed class VlcPlayerService : IPlayerService
     {
         return MediaPlayer.AudioTrackDescription
             .Where(track => track.Id >= 0)
-            .Select((track, index) => new PlaybackTrackInfo(
-                track.Id,
-                GetTrackName(track.Name, "Audio", index + 1)))
+            .Select((track, index) =>
+            {
+                var displayName = GetTrackName(track.Name, "Audio", index + 1);
+                var preferenceKey = string.IsNullOrWhiteSpace(track.Name)
+                    ? displayName
+                    : track.Name.Trim();
+                return new PlaybackTrackInfo(
+                    track.Id,
+                    displayName,
+                    PreferenceKey: preferenceKey);
+            })
             .GroupBy(track => track.Id)
             .Select(group => group.First())
             .ToArray();
@@ -159,9 +169,25 @@ public sealed class VlcPlayerService : IPlayerService
 
     private static string GetTrackName(string? name, string fallbackPrefix, int number)
     {
-        return string.IsNullOrWhiteSpace(name)
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return $"{fallbackPrefix} {number}";
+        }
+
+        var displayName = name.Trim();
+        var languageTagStart = displayName.LastIndexOf(" [", StringComparison.Ordinal);
+        if (languageTagStart >= 0 && displayName.EndsWith(']'))
+        {
+            displayName = displayName[..languageTagStart].TrimEnd();
+            if (displayName.EndsWith('-'))
+            {
+                displayName = displayName[..^1].TrimEnd();
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(displayName)
             ? $"{fallbackPrefix} {number}"
-            : name.Trim();
+            : displayName;
     }
 
     private void ApplyVolume()

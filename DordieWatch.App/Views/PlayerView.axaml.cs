@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Reactive;
 using Avalonia.VisualTree;
 using DordieWatch.App.ViewModels;
@@ -55,7 +56,7 @@ public partial class PlayerView : UserControl
 
         _owner.PositionChanged += OnOwnerPositionChanged;
         _owner.Deactivated += OnOwnerDeactivated;
-        _owner.KeyDown += OnOwnerKeyDown;
+        _owner.AddHandler(KeyDownEvent, OnOwnerKeyDown, RoutingStrategies.Tunnel, handledEventsToo: true);
         _ownerSizeSubscription = _owner.GetObservable(Window.ClientSizeProperty).Subscribe(new AnonymousObserver<Size>(_ =>
         {
             CloseOverlayMenus();
@@ -81,7 +82,7 @@ public partial class PlayerView : UserControl
         {
             _owner.PositionChanged -= OnOwnerPositionChanged;
             _owner.Deactivated -= OnOwnerDeactivated;
-            _owner.KeyDown -= OnOwnerKeyDown;
+            _owner.RemoveHandler(KeyDownEvent, OnOwnerKeyDown);
         }
 
         if (_overlay is not null)
@@ -120,6 +121,30 @@ public partial class PlayerView : UserControl
 
     private async void OnOwnerKeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.KeyModifiers == KeyModifiers.None && DataContext is PlayerViewModel viewModel)
+        {
+            if (e.Key == Key.Space)
+            {
+                e.Handled = true;
+                viewModel.TogglePausePlayback();
+                return;
+            }
+
+            if (e.Key == Key.Left)
+            {
+                e.Handled = true;
+                viewModel.SkipBackwardPlayback();
+                return;
+            }
+
+            if (e.Key == Key.Right)
+            {
+                e.Handled = true;
+                viewModel.SkipForwardPlayback();
+                return;
+            }
+        }
+
         if (e.Key == Key.F11 || (e.Key == Key.Escape && _owner?.WindowState == WindowState.FullScreen))
         {
             e.Handled = true;

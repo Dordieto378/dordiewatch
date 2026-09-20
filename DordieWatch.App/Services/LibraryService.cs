@@ -218,6 +218,34 @@ public sealed class LibraryService(
         await db.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task<string?> GetPreferredAudioTrackAsync(long mediaItemId, CancellationToken cancellationToken)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        return await db.MediaItems
+            .AsNoTracking()
+            .Where(x => x.Id == mediaItemId)
+            .Select(x => x.PreferredAudioTrack)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    public async Task SavePreferredAudioTrackAsync(long mediaItemId, string track, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(track))
+        {
+            return;
+        }
+
+        await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+        var mediaItem = await db.MediaItems.FirstOrDefaultAsync(x => x.Id == mediaItemId, cancellationToken);
+        if (mediaItem is null)
+        {
+            return;
+        }
+
+        mediaItem.PreferredAudioTrack = track.Trim();
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
     private static MediaLibraryItem ToLibraryItem(MediaItemEntity entity)
     {
         var progress = entity.Episodes

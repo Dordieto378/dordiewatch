@@ -15,6 +15,8 @@ public partial class PlayerControlsOverlayWindow : Window
     private bool _isDraggingTimeline;
     private bool _isDraggingVolume;
     private bool _areControlsVisible = true;
+    private bool _isFullscreen;
+    private PixelPoint? _lastPointerScreenPosition;
     private readonly DispatcherTimer _controlsHideTimer;
     private readonly DispatcherTimer _loadingSpinnerTimer;
     private readonly Cursor _hiddenCursor;
@@ -31,6 +33,7 @@ public partial class PlayerControlsOverlayWindow : Window
     private const double EpisodeMenuDesignHeight = 820;
     private const double EpisodeMenuDesignRightMargin = 0;
     private const double EpisodeMenuDesignBottomMargin = 68;
+    private const int MinimumPointerMovementPixels = 2;
 
     public event EventHandler? FullscreenToggleRequested;
 
@@ -47,12 +50,13 @@ public partial class PlayerControlsOverlayWindow : Window
         };
         DataContextChanged += OnDataContextChanged;
         RootLayer.AddHandler(PointerPressedEvent, OnRootPointerPressed, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
-        RootLayer.AddHandler(PointerMovedEvent, OnRootPointerMoved, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
+        RootLayer.AddHandler(PointerMovedEvent, OnRootPointerMoved, RoutingStrategies.Tunnel, handledEventsToo: true);
         TimelineArea.AddHandler(PointerMovedEvent, OnTimelinePointerMoved, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
         TimelineArea.AddHandler(PointerExitedEvent, OnTimelinePointerExited, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
         TimelineArea.AddHandler(PointerPressedEvent, OnTimelinePointerPressed, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
         TimelineArea.AddHandler(PointerReleasedEvent, OnTimelinePointerReleased, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
         SizeChanged += OnOverlaySizeChanged;
+        AddHandler(KeyDownEvent, OnOverlayKeyDown, RoutingStrategies.Tunnel, handledEventsToo: true);
         Opened += OnOpened;
         Deactivated += OnOverlayDeactivated;
         Closed += (_, _) =>
@@ -70,6 +74,8 @@ public partial class PlayerControlsOverlayWindow : Window
 
     private void OnOpened(object? sender, EventArgs e)
     {
+        Activate();
+        RootLayer.Focus();
         UpdateVolumeVisual();
         UpdateMenuPanelsLayout();
         RegisterControlsActivity();
@@ -87,8 +93,58 @@ public partial class PlayerControlsOverlayWindow : Window
         _viewModel?.HideVolumePopup();
     }
 
+    private void OnOverlayKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyModifiers != KeyModifiers.None)
+        {
+            return;
+        }
+
+        if (_viewModel is not null)
+        {
+            if (e.Key == Key.Space)
+            {
+                e.Handled = true;
+                _viewModel.TogglePausePlayback();
+                RegisterControlsActivity();
+                return;
+            }
+
+            if (e.Key == Key.Left)
+            {
+                e.Handled = true;
+                _viewModel.SkipBackwardPlayback();
+                RegisterControlsActivity();
+                return;
+            }
+
+            if (e.Key == Key.Right)
+            {
+                e.Handled = true;
+                _viewModel.SkipForwardPlayback();
+                RegisterControlsActivity();
+                return;
+            }
+        }
+
+        if (e.Key == Key.F11 || (e.Key == Key.Escape && _isFullscreen))
+        {
+            e.Handled = true;
+            FullscreenToggleRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
     private void OnRootPointerMoved(object? sender, PointerEventArgs e)
     {
+        var screenPosition = this.PointToScreen(e.GetPosition(this));
+        if (_lastPointerScreenPosition is { } previousPosition
+            && Math.Abs(screenPosition.X - previousPosition.X) < MinimumPointerMovementPixels
+            && Math.Abs(screenPosition.Y - previousPosition.Y) < MinimumPointerMovementPixels)
+        {
+            return;
+        }
+
+        _lastPointerScreenPosition = screenPosition;
         RegisterControlsActivity();
     }
 
@@ -313,6 +369,8 @@ public partial class PlayerControlsOverlayWindow : Window
 
     private void OnRootPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        _lastPointerScreenPosition = this.PointToScreen(e.GetPosition(this));
+        RootLayer.Focus();
         RegisterControlsActivity();
 
         if (_viewModel?.IsEpisodesMenuOpen == true
@@ -414,6 +472,7 @@ public partial class PlayerControlsOverlayWindow : Window
 
     public void SetFullscreenState(bool isFullscreen)
     {
+        _isFullscreen = isFullscreen;
         EnterFullscreenIcon.IsVisible = !isFullscreen;
         ExitFullscreenIcon.IsVisible = isFullscreen;
         ToolTip.SetTip(FullscreenButton, isFullscreen ? "Exit full screen" : "Full screen");
