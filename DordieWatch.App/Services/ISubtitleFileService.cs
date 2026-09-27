@@ -5,5 +5,5 @@ namespace DordieWatch.App.Services;
 public interface ISubtitleFileService
 {
     IReadOnlyList<ExternalSubtitleInfo> FindForVideo(string videoPath);
-    PreparedSubtitleInfo PrepareForPlayback(string subtitlePath);
+    PreparedSubtitleInfo PrepareForPlayback(string subtitlePath, string? videoPath = null);
 }

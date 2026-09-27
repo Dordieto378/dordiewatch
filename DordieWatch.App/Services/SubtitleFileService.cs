@@ -9,6 +9,7 @@ namespace DordieWatch.App.Services;
 public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFileService
 {
     private const string SubtitleRootFolderName = "subs";
+    private const string FontFolderName = "fonts";
     private const string AssExtension = ".ass";
     private const int DefaultPlayResX = 1920;
     private const int DefaultPlayResY = 1080;
@@ -56,7 +57,7 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
         }
     }
 
-    public PreparedSubtitleInfo PrepareForPlayback(string subtitlePath)
+    public PreparedSubtitleInfo PrepareForPlayback(string subtitlePath, string? videoPath = null)
     {
         var originalPlaybackInfo = CreateOriginalPlaybackInfo(subtitlePath);
         if (!File.Exists(subtitlePath)
@@ -68,23 +69,27 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
         try
         {
             var sourceInfo = new FileInfo(subtitlePath);
-            var hasFontFiles = HasSiblingFontFiles(sourceInfo.DirectoryName);
+            var fallbackFontDirectory = FindFallbackFontDirectory(sourceInfo.DirectoryName);
+            var embeddedFontKeys = ReadEmbeddedFontKeys(videoPath);
+            var subtitleFontFiles = FindFallbackFontFiles(sourceInfo.DirectoryName, embeddedFontKeys);
+            var fallbackFontFiles = FindFallbackFontFiles(fallbackFontDirectory, embeddedFontKeys);
             var usesNetflixSansBold = UsesNetflixSansBold(subtitlePath);
             var normalizedText = NormalizeAss(subtitlePath, usesNetflixSansBold);
-            if (normalizedText is null && !hasFontFiles && !usesNetflixSansBold)
+            if (normalizedText is null
+                && subtitleFontFiles.Count == 0
+                && fallbackFontFiles.Count == 0
+                && !usesNetflixSansBold)
             {
                 return originalPlaybackInfo;
             }
 
-            var cacheKey = $"prepare-ass-v11|{sourceInfo.FullName}|{sourceInfo.Length}|{sourceInfo.LastWriteTimeUtc.Ticks}|{normalizedText is not null}|{usesNetflixSansBold}";
+            var cacheKey = $"prepare-ass-v13|{sourceInfo.FullName}|{sourceInfo.Length}|{sourceInfo.LastWriteTimeUtc.Ticks}|{normalizedText is not null}|{usesNetflixSansBold}|{GetFileFingerprint(videoPath)}|{GetFontFingerprint(subtitleFontFiles, fallbackFontFiles)}";
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cacheKey)))
                 .ToLowerInvariant()[..16];
             var cacheDirectory = Path.Combine(paths.AppDataDirectory, "subtitle-cache", hash);
             Directory.CreateDirectory(cacheDirectory);
-            if (hasFontFiles)
-            {
-                CopySiblingFontFiles(sourceInfo.DirectoryName, cacheDirectory);
-            }
+            CopyFontFiles(fallbackFontFiles, cacheDirectory);
+            CopyFontFiles(subtitleFontFiles, cacheDirectory);
 
             if (usesNetflixSansBold)
             {
@@ -180,15 +185,106 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
             && subtitleNumber == videoNumber);
     }
 
-    private static void CopySiblingFontFiles(string? sourceDirectory, string cacheDirectory)
+    private string? FindFallbackFontDirectory(string? sourceDirectory)
     {
         if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
         {
-            return;
+            return null;
         }
 
-        foreach (var fontPath in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
-            .Where(path => FontFileExtensions.Contains(Path.GetExtension(path))))
+        var current = new DirectoryInfo(sourceDirectory);
+        var libraryRoot = Directory.Exists(paths.VideoLibraryDirectory)
+            ? new DirectoryInfo(paths.VideoLibraryDirectory).FullName
+            : null;
+
+        while (current is not null)
+        {
+            var fontDirectory = Directory.EnumerateDirectories(current.FullName)
+                .FirstOrDefault(path => string.Equals(
+                    Path.GetFileName(path),
+                    FontFolderName,
+                    StringComparison.OrdinalIgnoreCase));
+            if (fontDirectory is not null)
+            {
+                return fontDirectory;
+            }
+
+            if (libraryRoot is not null
+                && string.Equals(current.FullName, libraryRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            current = current.Parent;
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyList<string> FindFallbackFontFiles(
+        string? sourceDirectory,
+        IReadOnlySet<string> embeddedFontKeys)
+    {
+        if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
+        {
+            return [];
+        }
+
+        return Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
+            .Where(IsUsableFallbackFont)
+            .Where(path => !IsAlreadyEmbedded(path, embeddedFontKeys))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static HashSet<string> ReadEmbeddedFontKeys(string? videoPath)
+    {
+        try
+        {
+            return MatroskaFontAttachmentReader.ReadEmbeddedFontKeys(videoPath);
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+        catch (InvalidDataException)
+        {
+            return [];
+        }
+    }
+
+    private static bool IsAlreadyEmbedded(string fontPath, IReadOnlySet<string> embeddedFontKeys)
+    {
+        if (embeddedFontKeys.Count == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            return MatroskaFontAttachmentReader.ReadFontFileKeys(fontPath).Overlaps(embeddedFontKeys);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
+    }
+
+    private static void CopyFontFiles(IEnumerable<string> fontFiles, string cacheDirectory)
+    {
+        foreach (var fontPath in fontFiles)
         {
             var targetPath = Path.Combine(cacheDirectory, Path.GetFileName(fontPath));
             if (ShouldCopyFile(fontPath, targetPath))
@@ -211,12 +307,31 @@ public sealed partial class SubtitleFileService(IAppPaths paths) : ISubtitleFile
             || sourceInfo.LastWriteTimeUtc != targetInfo.LastWriteTimeUtc;
     }
 
-    private static bool HasSiblingFontFiles(string? sourceDirectory)
+    private static string GetFileFingerprint(string? path)
     {
-        return !string.IsNullOrWhiteSpace(sourceDirectory)
-            && Directory.Exists(sourceDirectory)
-            && Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
-                .Any(path => FontFileExtensions.Contains(Path.GetExtension(path)));
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return "";
+        }
+
+        var info = new FileInfo(path);
+        return $"{info.FullName}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+    }
+
+    private static string GetFontFingerprint(params IReadOnlyList<string>[] groups)
+    {
+        return string.Join(
+            "|",
+            groups.SelectMany(group => group)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .Select(GetFileFingerprint));
+    }
+
+    private static bool IsUsableFallbackFont(string path)
+    {
+        return FontFileExtensions.Contains(Path.GetExtension(path))
+            && !IsNetflixSansBold(Path.GetFileNameWithoutExtension(path));
     }
 
     private static void CopyBundledNetflixSansBoldFont(string cacheDirectory)

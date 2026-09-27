@@ -80,7 +80,7 @@ public sealed class VlcPlayerService : IPlayerService
         _currentVideoPath = videoPath;
         if (!string.IsNullOrWhiteSpace(subtitlePath) && File.Exists(subtitlePath))
         {
-            var playbackSubtitle = _subtitleFileService.PrepareForPlayback(subtitlePath);
+            var playbackSubtitle = _subtitleFileService.PrepareForPlayback(subtitlePath, videoPath);
             if (File.Exists(playbackSubtitle.Path))
             {
                 _selectedExternalSubtitlePath = subtitlePath;
@@ -173,7 +173,7 @@ public sealed class VlcPlayerService : IPlayerService
             return false;
         }
 
-        var playbackSubtitle = _subtitleFileService.PrepareForPlayback(subtitlePath);
+        var playbackSubtitle = _subtitleFileService.PrepareForPlayback(subtitlePath, _currentVideoPath);
         if (!File.Exists(playbackSubtitle.Path))
         {
             return false;
