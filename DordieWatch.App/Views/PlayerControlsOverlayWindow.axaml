@@ -956,6 +956,7 @@
                         Height="64"
                         Margin="0,0,0,10"
                         Tag="{Binding}"
+                        IsHitTestVisible="{Binding IsSelectable}"
                         PointerPressed="OnSubtitleTrackOptionPointerPressed">
                       <Grid ColumnDefinitions="42,*" Margin="2,0,16,0">
                         <Viewbox

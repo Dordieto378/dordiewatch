@@ -7,10 +7,12 @@ public sealed partial class PlayerTrackOptionViewModel(
     string name,
     bool isSelected,
     string? subtitlePath = null,
-    string? preferenceKey = null) : ObservableObject
+    string? preferenceKey = null,
+    bool isSelectable = true) : ObservableObject
 {
     public int Id { get; } = id;
     public string Name { get; } = name;
+    public bool IsSelectable { get; } = isSelectable;
     public string? SubtitlePath { get; } = subtitlePath;
     public string PreferenceKey { get; } = string.IsNullOrWhiteSpace(preferenceKey)
         ? name

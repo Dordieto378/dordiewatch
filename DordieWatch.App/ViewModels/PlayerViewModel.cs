@@ -470,6 +470,11 @@ public sealed partial class PlayerViewModel(
 
     public void SelectSubtitleOption(PlayerTrackOptionViewModel option)
     {
+        if (!option.IsSelectable)
+        {
+            return;
+        }
+
         IsPlaybackLoading = true;
         if (player.SelectSubtitleFile(option.SubtitlePath))
         {
@@ -703,6 +708,13 @@ public sealed partial class PlayerViewModel(
     {
         try
         {
+            if (_externalSubtitles.Count == 0)
+            {
+                SubtitleTrackOptions.Clear();
+                SubtitleTrackOptions.Add(new PlayerTrackOptionViewModel(-1, "None", false, isSelectable: false));
+                return;
+            }
+
             var selectedSubtitleId = -1;
             var subtitleTracks = new List<PlaybackTrackInfo> { new(-1, "Off") };
             for (var index = 0; index < _externalSubtitles.Count; index++)

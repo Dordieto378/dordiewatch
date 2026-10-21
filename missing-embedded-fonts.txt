@@ -1,0 +1,385 @@
+﻿Missing Embedded Fonts by Series
+Compared 528 ASS files with 524 matching MKV files across 82 series.
+A font is listed when an ASS file references it but its corresponding MKV does not contain it.
+
+Akane Is Picked And Dyed [13462]
+================================
+- Arial
+- Franco
+
+- Segoe UI Black
+- Segoe UI Semibold
+
+Aku no Onna Kanbu Full Moon Night R [16420]
+===========================================
+- Arial
+- brush-tipTerrence
+- Franco
+- Joshiraku OP
+
+- Segoe UI
+
+Boku dake no Hentai Kanojo Motto♥ THE ANIMATION [16432]
+=======================================================
+- AFZonYiW
+- Arial
+- Best of ttstd
+- BonusHearts
+- FOT-RodinHappy Pro UB
+- FOT-Slump Std DB
+
+- Okashi^
+- Shinano
+
+Boku dake no Hentai Kanojo THE ANIMATION [16433]
+================================================
+- AFZonYiW
+- Arial
+- Best of ttstd
+
+
+
+Daisuki na Mama [16438]
+=======================
+- Arno Pro Display
+- Chuu-2-ad Pro
+
+- Open Sans Semibold
+
+
+
+Ecchi na Onee-chan ni Shiboraretai [16441]
+==========================================
+- Arial
+- FOT-Seurat Pro DB
+
+- OakWood
+- Open Sans Semibold
+
+
+
+Fate Zero [16714] [16715]
+=========================
+- Heisei Kaku Gothic Std-Fate W5
+
+- TT-AnitoP-Fate
+
+
+Frieren Beyond Journey’s End [17389]
+====================================
+- Arial
+
+
+Hyouka What Should Be Had [16815]
+=================================
+- @Iwata Mincho Old Pro H-Fate
+
+
+Hyouka [16814]
+==============
+- @GeikaiSuikou-Nyarlko
+- 5
+- Adobe Caslon Pro
+- Akarinop
+- Corbell
+- Fxイーマ310
+- Fx勘亭流江戸文字
+- Fx行楷書体
+
+- PT Sans
+- Times New Roman
+
+
+JK Fuuzoku Gakuensai [16459]
+============================
+- Arial
+
+- ResPublica
+- Segoe UI
+- Segoe UI Semibold
+
+Kedamono-tachi no Sumu Ie de [17206]
+====================================
+- Georgia
+
+
+Kimi Omou Koi [16471]
+=====================
+- 00209
+- Arial
+- Brush Stroke
+- DFMaruGothic-SB
+- FOT-HummingStdEn-B
+- FOT-Klee Pro
+- FOT-ManyoGyosho Std E - EN
+- FOT-TsukuAOldMin Pr6 B
+- Lucida Casual Demi
+- Monotype Corsiva
+
+- Profile
+
+
+Kyonyuu Daikazoku Saimin [16477]
+================================
+- Akbar
+- Daigo W5 - EN
+
+- Open Sans Semibold
+
+
+Laid-Back Camp The Movie [17401]
+================================
+- Hujan
+
+
+Laid-Back Camp [17191]
+======================
+- Airstream ITC
+- Andy
+- appleberry
+- Arial Rounded MT Bold
+- Clannad Round
+- Eager Naturalist
+- FOT-Chiaro Std EN B
+- FOT-GMaruGo Pro DB
+- Iwata Mincho Pro M-Kami
+- KG Blank Space Solid
+- KG Shadow of the Day
+- KG Small Town Southern Girl
+- Korean Calligraphy
+- Kreon
+- Lato
+- Lato Black
+- Lato Light
+- LEHN026
+- Lucida Casual Demi
+
+- Playtime With Hot Toddies
+- Round Irregularity
+- Ruzicka TypeK
+
+
+
+Majuu Jouka Shoujo Utea [16479]
+===============================
+- DavidBecker
+- Garamand Classic Light
+- Lato
+- Maiandra GD
+- Malcom
+
+- PizzaDude Stars
+- RolandBecker
+- SomeAsianFontSTRIPPED
+- Swis721 BlkRnd BT
+- Swiss 721 Black Rounded BT UTEA
+- UDPMinchoMedSTRIPPED
+
+Mako-chan Kaihatsu Nikki [17204]
+================================
+- Arial
+
+
+Mushoku Tensei - Jobless Reincarnation [16958] [16959]
+======================================================
+- Arial
+
+
+Mushoku Tensei II - Jobless Reincarnation [17345] [17419]
+=========================================================
+- Arial
+
+
+Mushoku Tensei Jobless Reincarnation - Eris the Goblin Slayer [18609]
+=====================================================================
+- Arial
+
+
+Natsuyasumi Ake no Kanojo wa [17205]
+====================================
+- Arial
+
+
+Netosis [17211]
+===============
+- Arial
+
+
+Otomedori [17207]
+=================
+- Albertus Extra Bold
+- Army Wide
+- Baar Sophia
+- Myriad Condensed Web
+
+- SubDESU
+
+Overflow [16500]
+================
+- Arial
+- Chinacat
+- FOT ModeMin Std Bold
+- FOT-Seurat Pro B
+- Josh Handwriting
+
+- nusaliver
+- Pen of Truth
+- Segoe Print
+- Segoe UI
+
+Overlord II [17019]
+===================
+- Iwata Mincho Old Pro-TR
+
+
+Overlord III [17020]
+====================
+- Iwata Mincho Old Pro-TR
+
+
+Owarimonogatari Second Season [17025]
+=====================================
+
+- Open Sans
+
+
+RESORT BOIN [16507]
+===================
+
+- Tahoma
+
+Rikujoubu Joshi wa Ore no Nama Onaho!!! The Animation [16508]
+=============================================================
+- Arial
+
+
+ROOM CAMP [16785]
+=================
+- Lato
+
+
+Tsuma ga Kirei ni Natta Wake [16526]
+====================================
+- Arial
+
+- Open Sans Semibold
+- Segoe UI
+- Segoe UI Semibold
+- SketchFlow Print
+
+
+Violet Evergarden Special [18567]
+=================================
+- FOT-KleePro-DB-Str
+
+
+Violet Evergarden [17168]
+=========================
+- FOT-KleePro-DB-Str
+
+
+Yuru Camp△ SEASON 2 OVA [18835]
+===============================
+
+- SourceHanSansJP-Medium
+
+
+All Missing Fonts (Deduplicated)
+================================
+- @GeikaiSuikou-Nyarlko
+- @Iwata Mincho Old Pro H-Fate
+- 00209
+- 5
+- Adobe Caslon Pro
+- AFZonYiW
+- Airstream ITC
+- Akarinop
+- Akbar
+- Albertus Extra Bold
+- Andy
+- appleberry
+- Arial
+- Arial Rounded MT Bold
+- Army Wide
+- Arno Pro Display
+- Baar Sophia
+- Best of ttstd
+- BonusHearts
+- Brush Stroke
+- brush-tipTerrence
+- Chinacat
+- Chuu-2-ad Pro
+- Clannad Round
+- Corbell
+- Daigo W5 - EN
+- DavidBecker
+- DFMaruGothic-SB
+- Eager Naturalist
+- FOT ModeMin Std Bold
+- FOT-Chiaro Std EN B
+- FOT-GMaruGo Pro DB
+- FOT-HummingStdEn-B
+- FOT-Klee Pro
+- FOT-KleePro-DB-Str
+- FOT-ManyoGyosho Std E - EN
+- FOT-RodinHappy Pro UB
+- FOT-Seurat Pro B
+- FOT-Seurat Pro DB
+- FOT-Slump Std DB
+- FOT-TsukuAOldMin Pr6 B
+- Franco
+- Fxイーマ310
+- Fx勘亭流江戸文字
+- Fx行楷書体
+- Gandhi Sans
+- Garamand Classic Light
+- Georgia
+- Heisei Kaku Gothic Std-Fate W5
+- Hujan
+- Iwata Mincho Old Pro-TR
+- Iwata Mincho Pro M-Kami
+- Josh Handwriting
+- Joshiraku OP
+- KG Blank Space Solid
+- KG Shadow of the Day
+- KG Small Town Southern Girl
+- Korean Calligraphy
+- Kreon
+- Lato
+- Lato Black
+- Lato Light
+- LEHN026
+- Lucida Casual Demi
+- Maiandra GD
+- Malcom
+- Monotype Corsiva
+- Myriad Condensed Web
+- nusaliver
+- OakWood
+- Okashi^
+- Open Sans
+- Open Sans Semibold
+- Pen of Truth
+- PizzaDude Stars
+- Playtime With Hot Toddies
+- Profile
+- PT Sans
+- ResPublica
+- RolandBecker
+- Round Irregularity
+- Ruzicka TypeK
+- Segoe Print
+- Segoe UI
+- Segoe UI Black
+- Segoe UI Semibold
+- Shinano
+- SketchFlow Print
+- SomeAsianFontSTRIPPED
+- SourceHanSansJP-Medium
+- SubDESU
+- Swis721 BlkRnd BT
+- Swiss 721 Black Rounded BT UTEA
+- Tahoma
+- Times New Roman
+- TT-AnitoP-Fate
+- UDPMinchoMedSTRIPPED

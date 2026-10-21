@@ -16,6 +16,7 @@ internal static class Program
         {
             StartupArgs = args;
             WriteStartupLog("Main start");
+            InitializeWindowsSqlite();
             WindowsProtocolRegistration.TryRegister(Environment.ProcessPath);
             AppDomain.CurrentDomain.UnhandledException += (_, e) => WriteCrashLog(e.ExceptionObject);
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
@@ -33,6 +34,18 @@ internal static class Program
         return AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .LogToTrace();
+    }
+
+    private static void InitializeWindowsSqlite()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_winsqlite3());
+        SQLitePCL.raw.FreezeProvider();
+        WriteStartupLog("Windows SQLite provider ready");
     }
 
     internal static void WriteCrashLog(object? exception)

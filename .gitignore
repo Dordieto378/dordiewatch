@@ -5,6 +5,13 @@ publish/
 **/bin/
 **/obj/
 
+# Local development code-signing material
+*.pfx
+*.p12
+*.cer
+*.crt
+*.key
+
 # Local video libraries - never commit media files
 videos/
 **/videos/
